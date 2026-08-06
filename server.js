@@ -1699,7 +1699,10 @@ app.get("/api/telegram/status", (req, res) => {
 // unless ?notify=true is also passed — and even then, sendDailyDigest()'s
 // own once-per-day guard still applies, so this can't be used to spam
 // subscribers by hitting it repeatedly.
-app.post("/api/admin/refresh", async (req, res) => {
+// Accepts GET too (not just POST) so this can be triggered by just opening
+// the URL in a browser (e.g. from a phone) — still gated by ADMIN_SECRET,
+// and this only refreshes data, it doesn't delete or change anything.
+app.all("/api/admin/refresh", async (req, res) => {
   const secret = process.env.ADMIN_SECRET;
   if (!secret || req.query.secret !== secret) {
     return res.sendStatus(404);
