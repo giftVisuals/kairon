@@ -448,6 +448,70 @@ function buildMarketSnapshot(movers, trendingResp) {
   return { topGainers, topLosers, trending, updatedAt: new Date().toISOString() };
 }
 
+// Funding Rounds — DefiLlama's public "raises" endpoint (free, no key).
+let latestFundingRounds = [];
+
+app.get("/api/funding", (req, res) => {
+  res.json({ items: latestFundingRounds });
+});
+
+async function fetchFundingRounds() {
+  const res = await fetchWithTimeout("https://api.llama.fi/raises", { headers: { Accept: "application/json" } }, 10000);
+  if (!res.ok) throw new Error(`DefiLlama raises error: ${res.status}`);
+  return res.json();
+}
+
+function buildFundingRows(raisesResp) {
+  const raises = (raisesResp && raisesResp.raises) || [];
+  return [...raises]
+    .filter((r) => r && r.name && r.date)
+    .sort((a, b) => b.date - a.date)
+    .slice(0, 8)
+    .map((r) => {
+      const investors = [...(r.leadInvestors || []), ...(r.otherInvestors || [])].filter(Boolean);
+      return {
+        project: r.name,
+        amount: typeof r.amount === "number" && r.amount > 0 ? `$${r.amount}M` : "Undisclosed",
+        round: r.round || "Funding round",
+        investors: investors.length > 0 ? investors.slice(0, 4).join(", ") : "Undisclosed",
+        date: new Date(r.date * 1000).toISOString(),
+      };
+    });
+}
+
+// Exchange Listings — CoinGecko's public status_updates feed, filtered to
+// the exchange_listing category (free, no key). These are project-submitted
+// announcements, not a curated "just landed on Binance" feed, so quality
+// varies — but it's real, live data rather than another fabricated section.
+let latestExchangeListings = [];
+
+app.get("/api/listings", (req, res) => {
+  res.json({ items: latestExchangeListings });
+});
+
+async function fetchExchangeListingUpdates() {
+  const res = await fetchWithTimeout(
+    "https://api.coingecko.com/api/v3/status_updates?category=exchange_listing&per_page=10&page=1",
+    { headers: { Accept: "application/json" } },
+    10000
+  );
+  if (!res.ok) throw new Error(`CoinGecko status_updates error: ${res.status}`);
+  return res.json();
+}
+
+function buildListingRows(statusResp) {
+  const updates = (statusResp && statusResp.status_updates) || [];
+  return updates
+    .filter((u) => u && u.project)
+    .slice(0, 8)
+    .map((u) => ({
+      project: u.project.name || u.project.symbol || "Unknown project",
+      symbol: (u.project.symbol || "").toUpperCase(),
+      description: (u.description || "").slice(0, 160),
+      date: u.created_at || new Date().toISOString(),
+    }));
+}
+
 async function generateDailyIntelligence() {
   try {
     const [movers, trendingResp] = await Promise.all([fetchTopMarketMovers(), fetchTrendingSearch()]);
@@ -467,9 +531,24 @@ async function generateDailyIntelligence() {
     latestSummary = { points, generatedAt: new Date().toISOString() };
 
     console.log(`[intelligence] refreshed ${feedItems.length} feed items at ${latestSummary.generatedAt}`);
-    await sendDailyDigest();
   } catch (err) {
     console.error("[intelligence] generateDailyIntelligence failed, keeping previous data:", err.message);
+  }
+
+  // Independent of the block above: a DefiLlama or CoinGecko hiccup here
+  // shouldn't affect the main feed/summary that already succeeded.
+  try {
+    latestFundingRounds = buildFundingRows(await fetchFundingRounds());
+    console.log(`[intelligence] refreshed ${latestFundingRounds.length} funding rounds`);
+  } catch (err) {
+    console.error("[intelligence] funding rounds refresh failed, keeping previous data:", err.message);
+  }
+
+  try {
+    latestExchangeListings = buildListingRows(await fetchExchangeListingUpdates());
+    console.log(`[intelligence] refreshed ${latestExchangeListings.length} exchange listing updates`);
+  } catch (err) {
+    console.error("[intelligence] exchange listings refresh failed, keeping previous data:", err.message);
   }
 }
 
@@ -480,12 +559,23 @@ function msUntilNextUtcHour(hourUtc) {
   return next.getTime() - now.getTime();
 }
 
+// Data refresh and Telegram notification are deliberately separate calls.
+// generateDailyIntelligence() runs on every boot (so the site never shows
+// stale/empty data after a deploy) and would otherwise re-send the digest
+// on every redeploy — this ties the actual user-facing send to only the
+// scheduled 06:00 UTC tick (plus the once-per-day guard inside
+// sendDailyDigest() itself as a second line of defense).
+async function runScheduledDailyTick() {
+  await generateDailyIntelligence();
+  await sendDailyDigest();
+}
+
 function scheduleDailyIntelligence() {
   const delay = msUntilNextUtcHour(6);
   console.log(`[intelligence] next scheduled refresh in ${Math.round(delay / 60000)} minutes`);
   setTimeout(() => {
-    generateDailyIntelligence();
-    setInterval(generateDailyIntelligence, 24 * 60 * 60 * 1000);
+    runScheduledDailyTick();
+    setInterval(runScheduledDailyTick, 24 * 60 * 60 * 1000);
   }, delay);
 }
 
@@ -606,34 +696,107 @@ async function ensureTelegramWebhook() {
   }
 }
 
+// Per-chat category preferences for the daily digest. Empty/missing set
+// means "no filter — send everything." Same 15 categories as the site.
+const ALL_CATEGORIES = [
+  "Bitcoin", "Ethereum", "Solana", "Base", "DeFi", "Stablecoins", "Memecoins", "AI",
+  "Security", "Funding", "Governance", "Macro", "Exchanges", "NFTs", "Airdrops",
+];
+let telegramPreferences = new Map(); // chatId -> Set<category>
+
+function buildPreferencesKeyboard(selected) {
+  const rows = [];
+  for (let i = 0; i < ALL_CATEGORIES.length; i += 3) {
+    rows.push(
+      ALL_CATEGORIES.slice(i, i + 3).map((cat) => ({
+        text: `${selected.has(cat) ? "✅ " : ""}${cat}`,
+        callback_data: `pref:${cat}`,
+      }))
+    );
+  }
+  rows.push([{ text: "🔄 Reset (all categories)", callback_data: "pref_reset" }]);
+  rows.push([{ text: "✅ Done", callback_data: "pref_done" }]);
+  return { inline_keyboard: rows };
+}
+
+function welcomeText(firstName) {
+  const greeting = firstName ? `, ${firstName}` : "";
+  return [
+    `Welcome to Kairon${greeting}! 👋`,
+    "",
+    "I'm your daily on-chain intelligence briefing. Every morning at 06:00 UTC I'll send you one focused message covering the strongest, most interesting crypto signals — big market movers, trending coins, and an AI-written summary of what actually matters. One briefing a day, never more.",
+    "",
+    "Here's what you can do:",
+    "📋 /preferences — choose which categories you want in your briefing",
+    "🔕 /unsubscribe — stop receiving messages anytime",
+    "❓ /help — see this message again",
+  ].join("\n");
+}
+
+async function sendWelcomeMessage(chatId, from) {
+  await callTelegramApi("sendMessage", {
+    chat_id: chatId,
+    text: welcomeText(from && from.first_name),
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📋 Set Preferences", callback_data: "open_prefs" }],
+        [{ text: "🌐 Open Kairon", url: PUBLIC_URL }],
+      ],
+    },
+  });
+}
+
 // Sends one consolidated daily digest (today's summary + top signals) to
-// everyone who has messaged the bot, rather than a separate message per
-// feed item. Called automatically at the end of generateDailyIntelligence().
+// everyone who has messaged the bot, respecting each chat's category
+// preferences. Only ever called from the scheduled 06:00 UTC tick — never
+// from a data refresh — plus this date guard as a second safeguard against
+// double-sends (e.g. if the interval and a redeploy's boot run were to
+// somehow overlap). Note: this guard lives in memory, so it does not
+// survive a restart/redeploy on its own — the split from
+// generateDailyIntelligence() above is the primary protection.
+let lastDigestSentDateUTC = null;
+
 async function sendDailyDigest() {
   if (!isTelegramConfigured() || telegramLinks.length === 0) return;
 
-  const topItems = feedItems.slice(0, 3);
-  const lines = [
-    "*Kairon Daily Briefing*",
-    "",
-    ...latestSummary.points.map((p) => `• ${p}`),
-    "",
-    "*Top signals today:*",
-    ...topItems.map((i) => `— ${i.title}`),
-  ];
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastDigestSentDateUTC === today) {
+    console.log("[telegram] daily digest already sent today, skipping");
+    return;
+  }
 
   for (const link of telegramLinks) {
+    const prefs = telegramPreferences.get(link.chatId);
+    const relevant = prefs && prefs.size > 0 ? feedItems.filter((i) => prefs.has(i.category)) : feedItems;
+    if (relevant.length === 0) continue; // nothing matches their filter today — skip rather than send an empty digest
+
+    const lines = [
+      "*Kairon Daily Briefing*",
+      "",
+      ...latestSummary.points.map((p) => `• ${p}`),
+      "",
+      "*Top signals today:*",
+      ...relevant.slice(0, 3).map((i) => `— ${i.title}`),
+    ];
+
     try {
       await callTelegramApi("sendMessage", {
         chat_id: link.chatId,
         text: lines.join("\n"),
         parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "Open Kairon", url: PUBLIC_URL }]] },
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Open Kairon", url: PUBLIC_URL }],
+            [{ text: "📋 Preferences", callback_data: "open_prefs" }, { text: "🔕 Unsubscribe", callback_data: "ask_unsubscribe" }],
+          ],
+        },
       });
     } catch (err) {
       console.error("[telegram] failed to send daily digest to", link.chatId, err.message);
     }
   }
+
+  lastDigestSentDateUTC = today;
 }
 
 async function sendFeedNotification(chatId, feedItem) {
@@ -680,43 +843,158 @@ app.get("/api/telegram/link", (req, res) => {
   });
 });
 
+async function handleTelegramStart(message) {
+  const text = message.text || "";
+  const token = text.split(" ")[1];
+  const pending = token && telegramLinkTokens.get(token);
+  const chatId = message.chat.id;
+  const userId = pending ? pending.userId : `tg:${chatId}`;
+
+  if (pending) telegramLinkTokens.delete(token);
+
+  telegramLinks = telegramLinks.filter((l) => l.chatId !== chatId);
+  telegramLinks.push({
+    userId,
+    chatId,
+    telegramName: [message.from.first_name, message.from.last_name].filter(Boolean).join(" "),
+    username: message.from.username || "",
+    linkedAt: new Date().toISOString(),
+  });
+
+  await sendWelcomeMessage(chatId, message.from);
+}
+
+async function handleUnsubscribePrompt(chatId) {
+  await callTelegramApi("sendMessage", {
+    chat_id: chatId,
+    text: "Are you sure you want to unsubscribe from Kairon's daily briefing? You'll stop receiving messages until you send /start again.",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "✅ Yes, unsubscribe", callback_data: "unsub_confirm" }],
+        [{ text: "❌ No, stay subscribed", callback_data: "unsub_cancel" }],
+      ],
+    },
+  });
+}
+
+async function handlePreferencesCommand(chatId) {
+  const selected = telegramPreferences.get(chatId) || new Set();
+  await callTelegramApi("sendMessage", {
+    chat_id: chatId,
+    text: "Which categories do you want in your daily briefing? Tap to select or deselect — pick as many as you like.",
+    reply_markup: buildPreferencesKeyboard(selected),
+  });
+}
+
+async function handleTelegramCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message.chat.id;
+  const messageId = callbackQuery.message.message_id;
+
+  // Always acknowledge first so Telegram stops showing a loading spinner
+  // on the button, even if something below fails.
+  callTelegramApi("answerCallbackQuery", { callback_query_id: callbackQuery.id }).catch(() => {});
+
+  if (data === "open_prefs") {
+    await handlePreferencesCommand(chatId);
+    return;
+  }
+
+  if (data === "ask_unsubscribe") {
+    await handleUnsubscribePrompt(chatId);
+    return;
+  }
+
+  if (data.startsWith("pref:")) {
+    const category = data.slice(5);
+    const selected = telegramPreferences.get(chatId) || new Set();
+    if (selected.has(category)) selected.delete(category);
+    else selected.add(category);
+    telegramPreferences.set(chatId, selected);
+
+    await callTelegramApi("editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: buildPreferencesKeyboard(selected),
+    });
+    return;
+  }
+
+  if (data === "pref_reset") {
+    telegramPreferences.delete(chatId);
+    await callTelegramApi("editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: buildPreferencesKeyboard(new Set()),
+    });
+    return;
+  }
+
+  if (data === "pref_done") {
+    const selected = telegramPreferences.get(chatId) || new Set();
+    const summary = selected.size > 0 ? [...selected].join(", ") : "All categories";
+    await callTelegramApi("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: `Saved! You'll get briefings for: ${summary}`,
+      reply_markup: { inline_keyboard: [] },
+    });
+    return;
+  }
+
+  if (data === "unsub_confirm") {
+    telegramLinks = telegramLinks.filter((l) => l.chatId !== chatId);
+    telegramPreferences.delete(chatId);
+    await callTelegramApi("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: "You've been unsubscribed from Kairon's daily briefing. Send /start anytime to rejoin.",
+      reply_markup: { inline_keyboard: [] },
+    });
+    return;
+  }
+
+  if (data === "unsub_cancel") {
+    await callTelegramApi("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: "No worries — you're still subscribed to Kairon's daily briefing. 👍",
+      reply_markup: { inline_keyboard: [] },
+    });
+    return;
+  }
+}
+
 // Telegram webhook: receives updates once the bot is configured with
 // setWebhook. Handles "/start <token>" to complete account linking to a
 // signed-in Kairon user, or a bare "/start" to subscribe the chat to the
 // daily digest directly (no Kairon account needed yet — this is how
 // standalone subscribers, e.g. before the Settings/Link-Telegram UI is
-// built, start receiving the daily briefing).
+// built, start receiving the daily briefing). Also handles /unsubscribe,
+// /preferences, /help, and the inline button taps those send.
 app.post("/api/telegram/webhook", async (req, res) => {
   if (isTelegramConfigured() && req.get("X-Telegram-Bot-Api-Secret-Token") !== TELEGRAM_WEBHOOK_SECRET) {
     return res.sendStatus(401);
   }
 
-  const message = req.body && req.body.message;
+  const update = req.body || {};
+
+  if (update.callback_query) {
+    await handleTelegramCallback(update.callback_query);
+    return res.sendStatus(200);
+  }
+
+  const message = update.message;
   const text = message && message.text;
 
   if (text && text.startsWith("/start")) {
-    const token = text.split(" ")[1];
-    const pending = token && telegramLinkTokens.get(token);
-    const chatId = message.chat.id;
-    const userId = pending ? pending.userId : `tg:${chatId}`;
-
-    if (pending) telegramLinkTokens.delete(token);
-
-    telegramLinks = telegramLinks.filter((l) => l.chatId !== chatId);
-    telegramLinks.push({
-      userId,
-      chatId,
-      telegramName: [message.from.first_name, message.from.last_name].filter(Boolean).join(" "),
-      username: message.from.username || "",
-      linkedAt: new Date().toISOString(),
-    });
-
-    await callTelegramApi("sendMessage", {
-      chat_id: chatId,
-      text: pending
-        ? "✅ Your Telegram account is now linked to Kairon."
-        : "✅ You're subscribed to Kairon's daily on-chain briefing — one message every morning at 06:00 UTC.",
-    });
+    await handleTelegramStart(message);
+  } else if (text && text.startsWith("/unsubscribe")) {
+    await handleUnsubscribePrompt(message.chat.id);
+  } else if (text && (text.startsWith("/preferences") || text.startsWith("/preference"))) {
+    await handlePreferencesCommand(message.chat.id);
+  } else if (text && text.startsWith("/help")) {
+    await sendWelcomeMessage(message.chat.id, message.from);
   }
 
   res.sendStatus(200);
@@ -730,14 +1008,20 @@ app.get("/api/telegram/status", (req, res) => {
 
 // Manually forces a refresh of the daily intelligence pipeline — useful for
 // testing without waiting for the 06:00 UTC schedule. Disabled unless
-// ADMIN_SECRET is set in the environment.
+// ADMIN_SECRET is set in the environment. Does NOT send the Telegram digest
+// unless ?notify=true is also passed — and even then, sendDailyDigest()'s
+// own once-per-day guard still applies, so this can't be used to spam
+// subscribers by hitting it repeatedly.
 app.post("/api/admin/refresh", async (req, res) => {
   const secret = process.env.ADMIN_SECRET;
   if (!secret || req.query.secret !== secret) {
     return res.sendStatus(404);
   }
   await generateDailyIntelligence();
-  res.json({ ok: true, items: feedItems.length, summary: latestSummary });
+  if (req.query.notify === "true") {
+    await sendDailyDigest();
+  }
+  res.json({ ok: true, items: feedItems.length, summary: latestSummary, digestSentDate: lastDigestSentDateUTC });
 });
 
 // ---------------------------------------------------------------------------

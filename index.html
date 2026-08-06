@@ -1474,17 +1474,78 @@ async function loadInsights() {
 }
 
 /* ------------------------------------------------------------------ *
- * Smart Money / Listings / Funding — no real data source wired up yet
- * (see CLAUDE.md → FUTURE FEATURES: wallet tracking, exchange listings,
- * funding data). Rather than show fabricated numbers, these sections are
- * honest empty states until real data lands.
+ * Smart Money Activity — no free wallet-tracking data source exists yet
+ * (Whale Alert / Arkham / Nansen all require a paid API key we don't have).
+ * Rather than fabricate numbers, this stays an honest empty state.
  * ------------------------------------------------------------------ */
 function renderComingSoonRow(containerId, message) {
   document.getElementById(containerId).innerHTML = `<div class="row-empty">${escapeHtml(message)}</div>`;
 }
-renderComingSoonRow("row-smartmoney", "Wallet-tracking data is coming soon — this section will show real smart money activity.");
-renderComingSoonRow("row-listings", "Live exchange listing data is coming soon.");
-renderComingSoonRow("row-funding", "Live funding round data is coming soon.");
+renderComingSoonRow("row-smartmoney", "Wallet-tracking data needs a paid provider (Whale Alert / Arkham / Nansen) — not wired up yet.");
+
+/* ------------------------------------------------------------------ *
+ * Exchange Listings — real data from CoinGecko's status_updates feed
+ * (project-submitted "exchange listing" announcements).
+ * ------------------------------------------------------------------ */
+function listingCardHTML(item) {
+  return `
+    <article class="card">
+      <div class="card-top"><span class="badge">${escapeHtml(item.symbol || "Listing")}</span></div>
+      <h3 class="card-title">${escapeHtml(item.project)}</h3>
+      <p class="card-summary">${escapeHtml(item.description || "New exchange listing announcement.")}</p>
+      <div class="card-bottom"><span class="card-time">${timeAgo(item.date)}</span></div>
+    </article>
+  `;
+}
+
+async function loadListings() {
+  const el = document.getElementById("row-listings");
+  try {
+    const res = await fetch("/api/listings");
+    const data = await res.json();
+    if (!data.items || data.items.length === 0) {
+      el.innerHTML = `<div class="row-empty">No exchange listing announcements right now — check back soon.</div>`;
+      return;
+    }
+    el.innerHTML = data.items.map(listingCardHTML).join("");
+  } catch (err) {
+    console.error("Failed to load listings:", err);
+    el.innerHTML = `<div class="row-empty">Couldn't load exchange listings.</div>`;
+  }
+}
+loadListings();
+
+/* ------------------------------------------------------------------ *
+ * Funding Rounds — real data from DefiLlama's public raises API.
+ * ------------------------------------------------------------------ */
+function fundingCardHTML(item) {
+  return `
+    <article class="card">
+      <div class="card-top"><span class="badge">${escapeHtml(item.round)}</span></div>
+      <h3 class="card-title">${escapeHtml(item.project)}</h3>
+      <div class="kv-row"><span class="k">Raised</span><span class="v">${escapeHtml(item.amount)}</span></div>
+      <p class="card-summary">Investors: ${escapeHtml(item.investors)}</p>
+      <div class="card-bottom"><span class="card-time">${timeAgo(item.date)}</span></div>
+    </article>
+  `;
+}
+
+async function loadFunding() {
+  const el = document.getElementById("row-funding");
+  try {
+    const res = await fetch("/api/funding");
+    const data = await res.json();
+    if (!data.items || data.items.length === 0) {
+      el.innerHTML = `<div class="row-empty">No recent funding rounds to show right now.</div>`;
+      return;
+    }
+    el.innerHTML = data.items.map(fundingCardHTML).join("");
+  } catch (err) {
+    console.error("Failed to load funding rounds:", err);
+    el.innerHTML = `<div class="row-empty">Couldn't load funding rounds.</div>`;
+  }
+}
+loadFunding();
 
 /* ------------------------------------------------------------------ *
  * AI Market Summary — real summary generated server-side (Groq) from
