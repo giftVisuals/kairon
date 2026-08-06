@@ -288,12 +288,21 @@ app.get("/api/search", (req, res) => {
 // Requires sign-in (verifyAuth) and Firestore (bookmarks are meaningless
 // without persistence — no in-memory fallback here, unlike the rest of the
 // app, since a bookmark that vanishes on redeploy isn't useful at all).
+//
+// Stores a full snapshot of the feed item, not just its id — feedItems is
+// fully replaced every day, so an item bookmarked yesterday won't exist in
+// today's in-memory feed to look up. The snapshot is what the Bookmarks
+// page renders directly.
 // ---------------------------------------------------------------------------
 
 app.get("/api/bookmarks", verifyAuth, async (req, res) => {
   try {
     const snapshot = await firestoreDb.collection("bookmarks").where("uid", "==", req.uid).get();
-    res.json({ itemIds: snapshot.docs.map((d) => d.data().itemId) });
+    const items = snapshot.docs
+      .map((d) => d.data())
+      .sort((a, b) => new Date(b.bookmarkedAt) - new Date(a.bookmarkedAt))
+      .map((d) => ({ ...d.item, id: d.itemId, bookmarkedAt: d.bookmarkedAt }));
+    res.json({ items });
   } catch (err) {
     console.error("[bookmarks] failed to load:", err.message);
     res.status(500).json({ error: "Failed to load bookmarks." });
@@ -301,13 +310,14 @@ app.get("/api/bookmarks", verifyAuth, async (req, res) => {
 });
 
 app.post("/api/bookmarks", verifyAuth, async (req, res) => {
-  const { itemId } = req.body || {};
-  if (!itemId) return res.status(400).json({ error: "itemId is required" });
+  const { item } = req.body || {};
+  if (!item || !item.id) return res.status(400).json({ error: "item (with an id) is required" });
   try {
+    const { id, ...rest } = item;
     await firestoreDb
       .collection("bookmarks")
-      .doc(`${req.uid}_${itemId}`)
-      .set({ uid: req.uid, itemId, bookmarkedAt: new Date().toISOString() });
+      .doc(`${req.uid}_${id}`)
+      .set({ uid: req.uid, itemId: id, item: rest, bookmarkedAt: new Date().toISOString() });
     res.json({ ok: true });
   } catch (err) {
     console.error("[bookmarks] failed to save:", err.message);
@@ -376,28 +386,107 @@ async function fetchTopMarketMovers() {
   return res.json();
 }
 
-async function fetchTrendingSearch() {
+// Trending: DexScreener first (real on-chain/DEX activity — Solana boosted
+// tokens, matching how people actually trade this via Axiom/DexScreener),
+// falling back to CoinGecko's trending search if DexScreener fails. Neither
+// of these calls is verifiable from local dev (DexScreener is blocked from
+// this sandbox the same way CoinGecko is) — confirm via Railway logs after
+// deploy, same as the funding/listings issue.
+async function fetchDexScreenerTrending() {
+  const boostsRes = await fetchWithTimeout(
+    "https://api.dexscreener.com/token-boosts/top/v1",
+    { headers: { Accept: "application/json" } },
+    10000
+  );
+  if (!boostsRes.ok) throw new Error(`DexScreener boosts error: ${boostsRes.status}`);
+  const boosts = await boostsRes.json();
+
+  const solanaBoosts = (Array.isArray(boosts) ? boosts : [])
+    .filter((b) => b && b.chainId === "solana" && b.tokenAddress)
+    .slice(0, 10);
+  if (solanaBoosts.length === 0) throw new Error("No Solana boosted tokens returned");
+
+  const addresses = solanaBoosts.map((b) => b.tokenAddress).join(",");
+  const pairsRes = await fetchWithTimeout(
+    `https://api.dexscreener.com/latest/dex/tokens/${addresses}`,
+    { headers: { Accept: "application/json" } },
+    10000
+  );
+  if (!pairsRes.ok) throw new Error(`DexScreener tokens error: ${pairsRes.status}`);
+  const pairsData = await pairsRes.json();
+  const pairs = (pairsData && pairsData.pairs) || [];
+
+  // A token can have multiple pairs (pools) — keep the highest-liquidity one.
+  const byAddress = new Map();
+  for (const p of pairs) {
+    const addr = p.baseToken && p.baseToken.address;
+    if (!addr) continue;
+    const liquidity = (p.liquidity && p.liquidity.usd) || 0;
+    const existing = byAddress.get(addr);
+    if (!existing || liquidity > existing._liquidity) byAddress.set(addr, { ...p, _liquidity: liquidity });
+  }
+
+  const results = [];
+  for (const boost of solanaBoosts) {
+    const pair = byAddress.get(boost.tokenAddress);
+    if (!pair || !pair.baseToken) continue;
+    results.push({
+      id: boost.tokenAddress,
+      name: pair.baseToken.name || pair.baseToken.symbol || "Unknown",
+      symbol: (pair.baseToken.symbol || "").toUpperCase(),
+      marketCapRank: null,
+      change24h: pair.priceChange && typeof pair.priceChange.h24 === "number" ? pair.priceChange.h24 : null,
+      source: "dexscreener",
+    });
+  }
+  if (results.length === 0) throw new Error("Could not resolve any boosted token pairs to price data");
+  return results;
+}
+
+async function fetchCoinGeckoTrendingNormalized() {
   const res = await fetchWithTimeout("https://api.coingecko.com/api/v3/search/trending", {
     headers: { Accept: "application/json" },
   });
   if (!res.ok) throw new Error(`CoinGecko trending error: ${res.status}`);
-  return res.json();
+  const data = await res.json();
+  return (data.coins || []).map((c) => c.item).map((t) => ({
+    id: t.id,
+    name: t.name,
+    symbol: (t.symbol || "").toUpperCase(),
+    marketCapRank: t.market_cap_rank || null,
+    change24h:
+      t.data && t.data.price_change_percentage_24h && typeof t.data.price_change_percentage_24h.usd === "number"
+        ? t.data.price_change_percentage_24h.usd
+        : null,
+    source: "coingecko",
+  }));
 }
 
-function buildFeedItemsFromMarketData(movers, trendingResp) {
-  const trendingCoins = (trendingResp.coins || []).map((c) => c.item);
-  const trendingIds = new Set(trendingCoins.map((c) => c.id));
+async function fetchTrendingCoins() {
+  try {
+    const trending = await fetchDexScreenerTrending();
+    console.log(`[intelligence] using DexScreener trending (${trending.length} Solana tokens)`);
+    return trending;
+  } catch (err) {
+    console.error("[intelligence] DexScreener trending failed, falling back to CoinGecko trending:", err.message);
+    return fetchCoinGeckoTrendingNormalized();
+  }
+}
 
-  const significantMovers = movers
-    .filter((m) => typeof m.price_change_percentage_24h === "number")
-    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
-    .slice(0, 6);
+// BTC/ETH/SOL always appear in the feed and Insights regardless of whether
+// they're among the biggest movers — they're the reference points every
+// trader checks first, and a pure "sorted by % change" list tends to bury
+// them under far more volatile small-caps.
+const MAJOR_IDS = ["bitcoin", "ethereum", "solana"];
 
+function buildFeedItemsFromMarketData(movers, trending) {
+  const trendingIds = new Set(trending.map((t) => t.id));
   const items = [];
   const seen = new Set();
 
-  for (const m of significantMovers) {
-    if (seen.has(m.id)) continue;
+  for (const majorId of MAJOR_IDS) {
+    const m = movers.find((x) => x.id === majorId);
+    if (!m || typeof m.price_change_percentage_24h !== "number") continue;
     seen.add(m.id);
     const pct = m.price_change_percentage_24h;
     const direction = pct >= 0 ? "up" : "down";
@@ -406,25 +495,48 @@ function buildFeedItemsFromMarketData(movers, trendingResp) {
       title: `${m.name} (${m.symbol.toUpperCase()}) is ${direction} ${Math.abs(pct).toFixed(1)}% in the last 24 hours`,
       summary: `${m.name} is trading at ${formatUsd(m.current_price)} with a market cap of ${formatCompactUsd(
         m.market_cap
-      )}, ranked #${m.market_cap_rank} by market cap.${trendingIds.has(m.id) ? " It's also currently trending on CoinGecko." : ""}`,
+      )}, ranked #${m.market_cap_rank} by market cap.${trendingIds.has(m.id) ? " It's also currently trending." : ""}`,
+      category,
+      tags: [m.symbol.toUpperCase(), category, "Majors"],
+      trending: trendingIds.has(m.id) || Math.abs(pct) >= 8,
+    });
+  }
+
+  const significantMovers = movers
+    .filter((m) => typeof m.price_change_percentage_24h === "number" && !seen.has(m.id))
+    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
+    .slice(0, 6);
+
+  for (const m of significantMovers) {
+    seen.add(m.id);
+    const pct = m.price_change_percentage_24h;
+    const direction = pct >= 0 ? "up" : "down";
+    const category = inferCategory(m.id, m.symbol);
+    items.push({
+      title: `${m.name} (${m.symbol.toUpperCase()}) is ${direction} ${Math.abs(pct).toFixed(1)}% in the last 24 hours`,
+      summary: `${m.name} is trading at ${formatUsd(m.current_price)} with a market cap of ${formatCompactUsd(
+        m.market_cap
+      )}, ranked #${m.market_cap_rank} by market cap.${trendingIds.has(m.id) ? " It's also currently trending." : ""}`,
       category,
       tags: [m.symbol.toUpperCase(), category],
       trending: trendingIds.has(m.id) || Math.abs(pct) >= 8,
     });
   }
 
-  for (const t of trendingCoins.slice(0, 5)) {
+  for (const t of trending.slice(0, 5)) {
     if (seen.has(t.id)) continue;
     seen.add(t.id);
-    const category = inferCategory(t.id, t.symbol);
-    const change = t.data && t.data.price_change_percentage_24h && t.data.price_change_percentage_24h.usd;
+    let category = inferCategory(t.id, t.symbol.toLowerCase());
+    if (category === "Macro" && t.source === "dexscreener") category = "Solana";
+    const sourceLabel = t.source === "dexscreener" ? "DexScreener" : "CoinGecko";
+    const change = t.change24h;
     items.push({
-      title: `${t.name} (${(t.symbol || "").toUpperCase()}) is trending on CoinGecko today`,
-      summary: `${t.name} has climbed among the most-searched coins on CoinGecko in the past 24 hours${
-        typeof change === "number" ? `, with price ${change >= 0 ? "up" : "down"} ${Math.abs(change).toFixed(1)}% over the same period` : ""
+      title: `${t.name} (${t.symbol}) is trending on ${sourceLabel} today`,
+      summary: `${t.name} is trending on ${sourceLabel}${
+        typeof change === "number" ? `, with price ${change >= 0 ? "up" : "down"} ${Math.abs(change).toFixed(1)}% over the last 24 hours` : ""
       }.`,
       category,
-      tags: [(t.symbol || "").toUpperCase(), category, "Trending"],
+      tags: [t.symbol, category, "Trending"],
       trending: true,
     });
   }
@@ -432,10 +544,9 @@ function buildFeedItemsFromMarketData(movers, trendingResp) {
   return items;
 }
 
-async function generateAiSummary(movers, trendingResp) {
+async function generateAiSummary(movers, trending) {
   if (!GROQ_API_KEY) throw new Error("GROQ_API_KEY not configured");
 
-  const trendingCoins = (trendingResp.coins || []).map((c) => c.item);
   const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
   const topGainers = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h).slice(0, 5);
   const topLosers = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h).slice(0, 5);
@@ -443,7 +554,7 @@ async function generateAiSummary(movers, trendingResp) {
   const dataForPrompt = {
     topGainers: topGainers.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
     topLosers: topLosers.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
-    trending: trendingCoins.slice(0, 7).map((t) => ({ name: t.name, symbol: (t.symbol || "").toUpperCase() })),
+    trending: trending.slice(0, 7).map((t) => ({ name: t.name, symbol: t.symbol })),
   };
 
   const response = await fetchWithTimeout(
@@ -481,17 +592,17 @@ async function generateAiSummary(movers, trendingResp) {
   return parsed.points;
 }
 
-function buildFallbackSummary(movers, trendingResp) {
+function buildFallbackSummary(movers, trending) {
   const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
   const topGainer = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h)[0];
   const topLoser = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h)[0];
-  const trendingTop = (trendingResp.coins || [])[0] && trendingResp.coins[0].item;
+  const trendingTop = trending[0];
   const positiveCount = valid.filter((m) => m.price_change_percentage_24h > 0).length;
 
   const points = [];
   if (topGainer) points.push(`${topGainer.name} led the top 100 today, up ${topGainer.price_change_percentage_24h.toFixed(1)}% in 24 hours.`);
   if (topLoser) points.push(`${topLoser.name} was the biggest decliner, down ${Math.abs(topLoser.price_change_percentage_24h).toFixed(1)}%.`);
-  if (trendingTop) points.push(`${trendingTop.name} is today's most-searched coin on CoinGecko.`);
+  if (trendingTop) points.push(`${trendingTop.name} is today's top trending token right now.`);
   points.push(`${positiveCount} of the top 100 coins by market cap are in the green today.`);
   return points;
 }
@@ -500,7 +611,7 @@ let latestSummary = { points: ["Today's briefing is being generated — check ba
 
 // Raw market data behind the feed/summary, kept around so the Insights and
 // Alerts pages can show it directly instead of needing their own data source.
-let latestMarketSnapshot = { topGainers: [], topLosers: [], trending: [], updatedAt: null };
+let latestMarketSnapshot = { majors: [], topGainers: [], topLosers: [], trending: [], updatedAt: null };
 
 app.get("/api/summary", (req, res) => {
   res.json(latestSummary);
@@ -519,7 +630,7 @@ app.get("/api/alerts", (req, res) => {
   res.json({ items, total: items.length, updatedAt: latestSummary.generatedAt });
 });
 
-function buildMarketSnapshot(movers, trendingResp) {
+function buildMarketSnapshot(movers, trending) {
   const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
   const toRow = (m) => ({
     id: m.id,
@@ -530,20 +641,19 @@ function buildMarketSnapshot(movers, trendingResp) {
     marketCapRank: m.market_cap_rank,
   });
 
+  const majors = MAJOR_IDS.map((id) => valid.find((m) => m.id === id)).filter(Boolean).map(toRow);
   const topGainers = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h).slice(0, 10).map(toRow);
   const topLosers = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h).slice(0, 10).map(toRow);
-  const trending = ((trendingResp && trendingResp.coins) || []).slice(0, 10).map((c) => ({
-    id: c.item.id,
-    name: c.item.name,
-    symbol: (c.item.symbol || "").toUpperCase(),
-    marketCapRank: c.item.market_cap_rank || null,
-    change24h:
-      c.item.data && c.item.data.price_change_percentage_24h && typeof c.item.data.price_change_percentage_24h.usd === "number"
-        ? Number(c.item.data.price_change_percentage_24h.usd.toFixed(2))
-        : null,
+  const trendingRows = trending.slice(0, 10).map((t) => ({
+    id: t.id,
+    name: t.name,
+    symbol: t.symbol,
+    marketCapRank: t.marketCapRank,
+    change24h: typeof t.change24h === "number" ? Number(t.change24h.toFixed(2)) : null,
+    source: t.source,
   }));
 
-  return { topGainers, topLosers, trending, updatedAt: new Date().toISOString() };
+  return { majors, topGainers, topLosers, trending: trendingRows, updatedAt: new Date().toISOString() };
 }
 
 // Funding Rounds and Exchange Listings: both previously tried free
@@ -607,19 +717,19 @@ async function loadIntelligenceSnapshot() {
 
 async function generateDailyIntelligence() {
   try {
-    const [movers, trendingResp] = await Promise.all([fetchTopMarketMovers(), fetchTrendingSearch()]);
-    const built = buildFeedItemsFromMarketData(movers, trendingResp);
+    const [movers, trending] = await Promise.all([fetchTopMarketMovers(), fetchTrendingCoins()]);
+    const built = buildFeedItemsFromMarketData(movers, trending);
     if (built.length === 0) throw new Error("No feed items generated from market data");
 
     feedItems = toFeedRecords(built);
-    latestMarketSnapshot = buildMarketSnapshot(movers, trendingResp);
+    latestMarketSnapshot = buildMarketSnapshot(movers, trending);
 
     let points;
     try {
-      points = await generateAiSummary(movers, trendingResp);
+      points = await generateAiSummary(movers, trending);
     } catch (err) {
       console.error("[intelligence] Groq summary failed, using fallback summary:", err.message);
-      points = buildFallbackSummary(movers, trendingResp);
+      points = buildFallbackSummary(movers, trending);
     }
     latestSummary = { points, generatedAt: new Date().toISOString() };
 

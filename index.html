@@ -179,34 +179,40 @@
 
   .header-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 
-  .search-wrap { position: relative; display: flex; align-items: center; }
-  .search-form {
-    position: absolute; right: 0; top: 50%; transform: translateY(-50%) scaleX(0.85);
-    width: 0; opacity: 0; pointer-events: none; transition: all 0.18s ease; transform-origin: right;
+  /* Search — a floating glassmorphic dropdown below the header, not an
+     inline-expanding input. Input font-size is 16px on purpose: anything
+     smaller triggers iOS/Android's auto-zoom-on-focus, which is what made
+     this look like a "laptop view" bug before. */
+  .search-panel {
+    position: fixed; top: var(--header-h); left: 0; right: 0; z-index: 45;
+    display: flex; justify-content: center; padding: 12px 16px; pointer-events: none;
   }
-  .search-form.open {
-    width: min(320px, 60vw); opacity: 1; pointer-events: auto; transform: translateY(-50%) scaleX(1);
-    position: static; margin-right: 4px;
+  .search-panel:not(.hidden) { pointer-events: auto; }
+  .search-panel-inner {
+    width: 100%; max-width: 560px; max-height: 70vh; overflow-y: auto;
+    background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+    backdrop-filter: blur(20px) saturate(160%); -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg); padding: 14px;
+    opacity: 0; transform: translateY(-10px); transition: opacity 0.16s ease, transform 0.16s ease;
   }
-  .search-form input {
-    width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font-size: 13.5px; outline: none;
+  .search-panel:not(.hidden) .search-panel-inner { opacity: 1; transform: none; }
+  .search-input-wrap { position: relative; display: flex; align-items: center; }
+  .search-input-icon { position: absolute; left: 13px; width: 17px; height: 17px; color: var(--text-faint); pointer-events: none; }
+  .search-panel input {
+    width: 100%; padding: 12px 14px 12px 38px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 16px; outline: none;
   }
-  .search-form input:focus { border-color: var(--accent); }
+  .search-panel input:focus { border-color: var(--accent); }
 
-  .search-results {
-    position: absolute; top: var(--header-h); left: 0; right: 0;
-    background: var(--bg-elevated); border-bottom: 1px solid var(--border);
-    box-shadow: var(--shadow-md); max-height: 60vh; overflow-y: auto; z-index: 39;
-  }
-  .search-results-inner { max-width: var(--container); margin: 0 auto; padding: 8px 20px 16px; }
+  .search-results-inner { padding-top: 10px; }
   .search-result-item {
     display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 10px;
   }
   .search-result-item:hover { background: var(--surface-hover); }
   .search-result-title { font-size: 14px; font-weight: 600; }
   .search-result-meta { font-size: 12px; color: var(--text-muted); }
-  .search-empty { padding: 20px 12px; color: var(--text-muted); font-size: 13.5px; }
+  .search-empty { padding: 10px 12px; color: var(--text-muted); font-size: 13.5px; }
 
   .nav-toggle { display: inline-flex; }
 
@@ -526,18 +532,14 @@
       <button class="nav-link" data-nav data-view="feed">Feed</button>
       <button class="nav-link" data-nav data-view="insights">Insights</button>
       <button class="nav-link" data-nav data-view="alerts">Alerts</button>
+      <button class="nav-link" data-nav data-view="bookmarks">Bookmarks</button>
       <button class="nav-link" data-nav data-view="settings">Settings</button>
     </nav>
 
     <div class="header-actions">
-      <div class="search-wrap">
-        <form class="search-form" id="searchForm" novalidate>
-          <input id="searchInput" type="search" placeholder="Search intelligence, tags, categories…" autocomplete="off" />
-        </form>
-        <button class="icon-btn" id="searchToggle" aria-label="Search" aria-expanded="false">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        </button>
-      </div>
+      <button class="icon-btn" id="searchToggle" aria-label="Search" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      </button>
 
       <button class="icon-btn" id="themeToggle" aria-label="Toggle theme">
         <svg id="themeIconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>
@@ -554,8 +556,16 @@
     </div>
   </div>
 
-  <div id="searchResults" class="search-results hidden">
-    <div class="search-results-inner" id="searchResultsInner"></div>
+  <div id="searchPanel" class="search-panel hidden">
+    <div class="search-panel-inner">
+      <form id="searchForm" novalidate>
+        <div class="search-input-wrap">
+          <svg class="search-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input id="searchInput" type="search" placeholder="Search intelligence, tags, categories…" autocomplete="off" />
+        </div>
+      </form>
+      <div class="search-results-inner" id="searchResultsInner"></div>
+    </div>
   </div>
 </header>
 
@@ -564,6 +574,7 @@
   <button class="nav-link" data-nav data-view="feed">Feed</button>
   <button class="nav-link" data-nav data-view="insights">Insights</button>
   <button class="nav-link" data-nav data-view="alerts">Alerts</button>
+  <button class="nav-link" data-nav data-view="bookmarks">Bookmarks</button>
   <button class="nav-link" data-nav data-view="settings">Settings</button>
   <div class="mobile-nav-actions" id="mobileAuthArea"></div>
 </div>
@@ -640,6 +651,10 @@
     </div>
     <div class="insights-grid">
       <div class="insights-panel">
+        <h3>Majors</h3>
+        <div id="insightsMajors" class="insights-table"></div>
+      </div>
+      <div class="insights-panel">
         <h3>Top Gainers</h3>
         <div id="insightsGainers" class="insights-table"></div>
       </div>
@@ -648,7 +663,7 @@
         <div id="insightsLosers" class="insights-table"></div>
       </div>
       <div class="insights-panel">
-        <h3>Trending on CoinGecko</h3>
+        <h3 id="insightsTrendingHeading">Trending</h3>
         <div id="insightsTrending" class="insights-table"></div>
       </div>
     </div>
@@ -660,6 +675,25 @@
       <p>Public, no sign-in required — today's most significant moves and trending signals.</p>
     </div>
     <div class="feed-grid" id="alertsGrid"></div>
+  </section>
+
+  <section class="view hidden" id="view-bookmarks" data-view-panel="bookmarks">
+    <div class="placeholder-view hidden" id="bookmarksGuest">
+      <div class="placeholder-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+      </div>
+      <h2>Sign in to view your Bookmarks</h2>
+      <p>Bookmarked articles are saved to your account so you can find them from any device.</p>
+      <button class="btn btn-primary" id="bookmarksSignInBtn" style="margin-top: 8px">Sign In</button>
+    </div>
+
+    <div class="hidden" id="view-bookmarks-content">
+      <div class="page-header">
+        <h1>Bookmarks</h1>
+        <p>Articles you've saved for later.</p>
+      </div>
+      <div class="feed-grid" id="bookmarksGrid"></div>
+    </div>
   </section>
 
   <section class="view hidden" id="view-settings" data-view-panel="settings">
@@ -726,6 +760,7 @@
         <a href="#/feed" data-nav data-view="feed">Feed</a>
         <a href="#/insights" data-nav data-view="insights">Insights</a>
         <a href="#/alerts" data-nav data-view="alerts">Alerts</a>
+        <a href="#/bookmarks" data-nav data-view="bookmarks">Bookmarks</a>
         <a href="#/settings" data-nav data-view="settings">Settings</a>
       </div>
     </div>
@@ -875,12 +910,13 @@ function navigate(view) {
   if (view === "feed") renderFeedGrid();
   if (view === "insights") loadInsights();
   if (view === "alerts") loadAlerts();
+  if (view === "bookmarks") renderBookmarksView();
   if (view === "settings") renderSettingsView();
 }
 
 function routeFromHash() {
   const hash = window.location.hash.replace(/^#\//, "").split("/")[0] || "home";
-  const valid = ["home", "feed", "insights", "alerts", "settings"];
+  const valid = ["home", "feed", "insights", "alerts", "bookmarks", "settings"];
   navigate(valid.includes(hash) ? hash : "home");
 }
 
@@ -913,16 +949,24 @@ function closeMobileNav() {
  * Search
  * ------------------------------------------------------------------ */
 const searchToggle = document.getElementById("searchToggle");
+const searchPanel = document.getElementById("searchPanel");
 const searchForm = document.getElementById("searchForm");
 const searchInput = document.getElementById("searchInput");
-const searchResults = document.getElementById("searchResults");
 const searchResultsInner = document.getElementById("searchResultsInner");
 
+function openSearchPanel() {
+  searchPanel.classList.remove("hidden");
+  searchToggle.setAttribute("aria-expanded", "true");
+  searchInput.focus();
+}
+function closeSearchPanel() {
+  searchPanel.classList.add("hidden");
+  searchToggle.setAttribute("aria-expanded", "false");
+}
+
 searchToggle.addEventListener("click", () => {
-  const open = searchForm.classList.toggle("open");
-  searchToggle.setAttribute("aria-expanded", String(open));
-  if (open) searchInput.focus();
-  else { searchResults.classList.add("hidden"); }
+  if (searchPanel.classList.contains("hidden")) openSearchPanel();
+  else closeSearchPanel();
 });
 
 let searchDebounce;
@@ -930,7 +974,7 @@ searchInput.addEventListener("input", () => {
   clearTimeout(searchDebounce);
   const q = searchInput.value.trim();
   if (q.length < 2) {
-    searchResults.classList.add("hidden");
+    searchResultsInner.innerHTML = "";
     return;
   }
   searchDebounce = setTimeout(() => runSearch(q), 220);
@@ -951,33 +995,34 @@ function renderSearchResults(items) {
   searchResultsInner.innerHTML = "";
   if (items.length === 0) {
     searchResultsInner.innerHTML = `<div class="search-empty">No results found.</div>`;
-  } else {
-    items.slice(0, 8).forEach((item) => {
-      const row = document.createElement("button");
-      row.className = "search-result-item";
-      row.style.width = "100%";
-      row.style.border = "none";
-      row.style.background = "none";
-      row.style.textAlign = "left";
-      row.innerHTML = `
-        <span class="search-result-title">${escapeHtml(item.title)}</span>
-        <span class="search-result-meta">${escapeHtml(item.category)} · ${timeAgo(item.publishedAt)}</span>
-      `;
-      row.addEventListener("click", () => {
-        searchResults.classList.add("hidden");
-        searchForm.classList.remove("open");
-        openArticle(item);
-      });
-      searchResultsInner.appendChild(row);
-    });
+    return;
   }
-  searchResults.classList.remove("hidden");
+  items.slice(0, 8).forEach((item) => {
+    const row = document.createElement("button");
+    row.className = "search-result-item";
+    row.style.width = "100%";
+    row.style.border = "none";
+    row.style.background = "none";
+    row.style.textAlign = "left";
+    row.innerHTML = `
+      <span class="search-result-title">${escapeHtml(item.title)}</span>
+      <span class="search-result-meta">${escapeHtml(item.category)} · ${timeAgo(item.publishedAt)}</span>
+    `;
+    row.addEventListener("click", () => {
+      closeSearchPanel();
+      openArticle(item);
+    });
+    searchResultsInner.appendChild(row);
+  });
 }
 
 document.addEventListener("click", (e) => {
-  if (!searchResults.contains(e.target) && !searchForm.contains(e.target) && e.target !== searchToggle) {
-    searchResults.classList.add("hidden");
+  if (!searchPanel.contains(e.target) && e.target !== searchToggle && !searchToggle.contains(e.target)) {
+    closeSearchPanel();
   }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSearchPanel();
 });
 
 /* ------------------------------------------------------------------ *
@@ -1236,9 +1281,14 @@ async function apiFetch(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 
+// bookmarks: Set of ids, used for the filled/unfilled icon on every card.
+// bookmarkedItems: full item snapshots, used by the Bookmarks page.
+let bookmarkedItems = [];
+
 async function loadBookmarksFromServer() {
   if (!currentUser) {
     bookmarks = new Set();
+    bookmarkedItems = [];
     renderAllFeedRows();
     return;
   }
@@ -1246,21 +1296,30 @@ async function loadBookmarksFromServer() {
     const res = await apiFetch("/api/bookmarks");
     if (!res.ok) throw new Error(`Failed to load bookmarks (${res.status})`);
     const data = await res.json();
-    bookmarks = new Set(data.itemIds || []);
+    bookmarkedItems = data.items || [];
+    bookmarks = new Set(bookmarkedItems.map((i) => i.id));
   } catch (err) {
     console.error("Failed to load bookmarks:", err);
     bookmarks = new Set();
+    bookmarkedItems = [];
   }
   renderAllFeedRows();
+  if (!document.getElementById("view-bookmarks").classList.contains("hidden")) renderBookmarksView();
 }
 
 function toggleBookmark(item) {
   requireAuth(async () => {
     const wasBookmarked = bookmarks.has(item.id);
     // Optimistic update — reverted below if the server call fails.
-    if (wasBookmarked) bookmarks.delete(item.id);
-    else bookmarks.add(item.id);
+    if (wasBookmarked) {
+      bookmarks.delete(item.id);
+      bookmarkedItems = bookmarkedItems.filter((i) => i.id !== item.id);
+    } else {
+      bookmarks.add(item.id);
+      bookmarkedItems = [{ ...item, bookmarkedAt: new Date().toISOString() }, ...bookmarkedItems];
+    }
     renderAllFeedRows();
+    renderBookmarksView();
 
     try {
       const res = wasBookmarked
@@ -1268,15 +1327,21 @@ function toggleBookmark(item) {
         : await apiFetch("/api/bookmarks", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ itemId: item.id }),
+            body: JSON.stringify({ item }),
           });
       if (!res.ok) throw new Error(`Bookmark update failed (${res.status})`);
       toast(wasBookmarked ? "Removed bookmark." : "Saved to bookmarks.");
     } catch (err) {
       console.error("Bookmark update failed:", err);
-      if (wasBookmarked) bookmarks.add(item.id);
-      else bookmarks.delete(item.id);
+      if (wasBookmarked) {
+        bookmarks.add(item.id);
+        bookmarkedItems = [item, ...bookmarkedItems];
+      } else {
+        bookmarks.delete(item.id);
+        bookmarkedItems = bookmarkedItems.filter((i) => i.id !== item.id);
+      }
       renderAllFeedRows();
+      renderBookmarksView();
       toast("Couldn't update bookmark. Please try again.");
     }
   }, "Sign in to bookmark articles.");
@@ -1496,20 +1561,26 @@ function insightRowHTML(row) {
 }
 
 async function loadInsights() {
+  const majorsEl = document.getElementById("insightsMajors");
   const gainersEl = document.getElementById("insightsGainers");
   const losersEl = document.getElementById("insightsLosers");
   const trendingEl = document.getElementById("insightsTrending");
-  [gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Loading…</div>`; });
+  const trendingHeading = document.getElementById("insightsTrendingHeading");
+  const emptyMsg = `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
+  [majorsEl, gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Loading…</div>`; });
 
   try {
     const res = await fetch("/api/insights");
     const data = await res.json();
-    gainersEl.innerHTML = (data.topGainers || []).length ? data.topGainers.map(insightRowHTML).join("") : `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
-    losersEl.innerHTML = (data.topLosers || []).length ? data.topLosers.map(insightRowHTML).join("") : `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
-    trendingEl.innerHTML = (data.trending || []).length ? data.trending.map(insightRowHTML).join("") : `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
+    majorsEl.innerHTML = (data.majors || []).length ? data.majors.map(insightRowHTML).join("") : emptyMsg;
+    gainersEl.innerHTML = (data.topGainers || []).length ? data.topGainers.map(insightRowHTML).join("") : emptyMsg;
+    losersEl.innerHTML = (data.topLosers || []).length ? data.topLosers.map(insightRowHTML).join("") : emptyMsg;
+    trendingEl.innerHTML = (data.trending || []).length ? data.trending.map(insightRowHTML).join("") : emptyMsg;
+    const trendingSource = data.trending && data.trending[0] && data.trending[0].source;
+    trendingHeading.textContent = trendingSource === "coingecko" ? "Trending on CoinGecko" : "Trending on DexScreener";
   } catch (err) {
     console.error("Failed to load insights:", err);
-    [gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Couldn't load data.</div>`; });
+    [majorsEl, gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Couldn't load data.</div>`; });
   }
 }
 
@@ -1559,6 +1630,32 @@ document.getElementById("heroSummaryBtn").addEventListener("click", () => {
 });
 
 document.getElementById("year").textContent = new Date().getFullYear();
+
+/* ------------------------------------------------------------------ *
+ * Bookmarks page
+ * ------------------------------------------------------------------ */
+const bookmarksGuest = document.getElementById("bookmarksGuest");
+const bookmarksContent = document.getElementById("view-bookmarks-content");
+const bookmarksSignInBtn = document.getElementById("bookmarksSignInBtn");
+bookmarksSignInBtn.addEventListener("click", () => openAuthModal());
+
+function renderBookmarksView() {
+  if (!currentUser) {
+    bookmarksGuest.classList.remove("hidden");
+    bookmarksContent.classList.add("hidden");
+    return;
+  }
+
+  bookmarksGuest.classList.add("hidden");
+  bookmarksContent.classList.remove("hidden");
+
+  const gridEl = document.getElementById("bookmarksGrid");
+  if (bookmarkedItems.length === 0) {
+    gridEl.innerHTML = `<div class="row-empty grid-empty">No bookmarks yet — tap the bookmark icon on any article to save it here.</div>`;
+    return;
+  }
+  renderFeedRow("bookmarksGrid", bookmarkedItems);
+}
 
 /* ------------------------------------------------------------------ *
  * Settings page — profile (name, photo), Telegram linking, theme.
