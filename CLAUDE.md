@@ -248,6 +248,14 @@ fix: improve mobile responsiveness
 
 If Git is not connected, ask before attempting to push.
 
+**Branching:** work directly on `main` and push there. Do not create or push to feature branches — the user has given standing permission for direct pushes to `main`, and Railway auto-deploys from `main` on every push (see DEPLOYMENT below).
+
+---
+
+## DEPLOYMENT
+
+Hosting is Railway, connected via GitHub integration on this repo — it auto-builds and deploys on every push to `main` (`npm install` then `npm start`). No separate deploy step is needed; pushing to `main` is the deploy.
+
 ---
 
 ## FINAL INSTRUCTION
