@@ -10,7 +10,20 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3000;
-const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+const PUBLIC_URL = process.env.PUBLIC_URL || "https://kairon-production-79a5.up.railway.app";
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const app = express();
 app.use(express.json());
@@ -36,7 +49,21 @@ function slugify(title) {
     .replace(/-+/g, "-");
 }
 
-let feedItems = [
+function toFeedRecords(items) {
+  return items.map((item, index) => ({
+    id: crypto.randomUUID(),
+    slug: slugify(item.title),
+    publishedAt: item.publishedAt || new Date(Date.now() - index * 1000 * 60 * 47).toISOString(),
+    ...item,
+  }));
+}
+
+// Used only until the real data pipeline (CoinGecko + Groq, further below)
+// completes its first run, or if that pipeline fails entirely (e.g. market
+// data API unreachable). generateDailyIntelligence() overwrites this with
+// live data on startup and every day at 06:00 UTC — this is not shown in
+// normal operation.
+const FALLBACK_FEED_SEED = [
   {
     title: "Base memecoin rally sends volumes to a 3-month high",
     summary:
@@ -54,38 +81,6 @@ let feedItems = [
     trending: true,
   },
   {
-    title: "Binance lists XYZ with a Launchpool campaign",
-    summary:
-      "Binance added XYZ to its Launchpool program ahead of spot trading, giving BNB holders early access to farming rewards.",
-    category: "Exchanges",
-    tags: ["Binance", "Exchanges", "Listings"],
-    trending: false,
-  },
-  {
-    title: "Solana DeFi TVL crosses $6B as lending protocols surge",
-    summary:
-      "Lending markets led the gains as Solana DeFi TVL hit a new yearly high, outpacing growth across most L1 ecosystems.",
-    category: "DeFi",
-    tags: ["Solana", "DeFi"],
-    trending: true,
-  },
-  {
-    title: "a16z leads $40M round for a new restaking protocol",
-    summary:
-      "The new protocol aims to bring restaking-secured infrastructure to app-specific rollups, with a mainnet launch planned for Q1.",
-    category: "Funding",
-    tags: ["Funding", "Ethereum"],
-    trending: false,
-  },
-  {
-    title: "New governance proposal aims to cut Arbitrum sequencer fees",
-    summary:
-      "The proposal would reduce sequencer fees by roughly 30%, with the DAO vote expected to close within the next week.",
-    category: "Governance",
-    tags: ["Governance", "Ethereum"],
-    trending: false,
-  },
-  {
     title: "Bitcoin dominance holds above 54% amid muted alt season signals",
     summary:
       "Bitcoin's market share has held steady for three weeks, a sign traders are still favoring majors over altcoins.",
@@ -101,12 +96,9 @@ let feedItems = [
     tags: ["Stablecoins", "Macro"],
     trending: false,
   },
-].map((item, index) => ({
-  id: crypto.randomUUID(),
-  slug: slugify(item.title),
-  publishedAt: new Date(Date.now() - index * 1000 * 60 * 47).toISOString(),
-  ...item,
-}));
+];
+
+let feedItems = toFeedRecords(FALLBACK_FEED_SEED);
 
 function findFeedIndexById(id) {
   return feedItems.findIndex((item) => item.id === id);
@@ -232,6 +224,223 @@ app.get("/api/search", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Daily intelligence pipeline (real data)
+//
+// Replaces the feed and AI summary with real market data once a day (and
+// once immediately on boot). Market data comes from CoinGecko's public API
+// (no key required). The AI Market Summary is written by Groq from that
+// same real data — the model is instructed to only use the numbers it's
+// given, never invent facts, so per-item titles/summaries are built
+// deterministically from the raw numbers (no hallucination risk) and Groq
+// is used specifically for the narrative synthesis in the summary.
+// ---------------------------------------------------------------------------
+
+const CATEGORY_BY_ID = {
+  bitcoin: "Bitcoin",
+  ethereum: "Ethereum",
+  solana: "Solana",
+};
+const STABLECOIN_SYMBOLS = new Set(["usdt", "usdc", "dai", "busd", "tusd", "usde", "fdusd", "usdd", "pyusd"]);
+const MEME_SYMBOLS = new Set(["doge", "shib", "pepe", "floki", "bonk", "wif", "brett", "popcat", "mog", "turbo", "myro", "wojak", "trump"]);
+const DEFI_SYMBOLS = new Set(["uni", "aave", "crv", "mkr", "ldo", "cake", "comp", "snx", "sushi", "1inch", "dydx", "gmx", "pendle"]);
+const EXCHANGE_SYMBOLS = new Set(["bnb", "okb", "cro", "ht", "gt"]);
+
+function inferCategory(id, symbol) {
+  if (CATEGORY_BY_ID[id]) return CATEGORY_BY_ID[id];
+  const s = (symbol || "").toLowerCase();
+  if (STABLECOIN_SYMBOLS.has(s)) return "Stablecoins";
+  if (MEME_SYMBOLS.has(s)) return "Memecoins";
+  if (DEFI_SYMBOLS.has(s)) return "DeFi";
+  if (EXCHANGE_SYMBOLS.has(s)) return "Exchanges";
+  return "Macro";
+}
+
+function formatUsd(n) {
+  if (typeof n !== "number") return "N/A";
+  if (n > 0 && n < 1) return `$${n.toPrecision(3)}`;
+  return `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+function formatCompactUsd(n) {
+  if (typeof n !== "number") return "N/A";
+  return `$${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(n)}`;
+}
+
+async function fetchTopMarketMovers() {
+  const url =
+    "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&price_change_percentage=24h";
+  const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`CoinGecko markets error: ${res.status}`);
+  return res.json();
+}
+
+async function fetchTrendingSearch() {
+  const res = await fetchWithTimeout("https://api.coingecko.com/api/v3/search/trending", {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`CoinGecko trending error: ${res.status}`);
+  return res.json();
+}
+
+function buildFeedItemsFromMarketData(movers, trendingResp) {
+  const trendingCoins = (trendingResp.coins || []).map((c) => c.item);
+  const trendingIds = new Set(trendingCoins.map((c) => c.id));
+
+  const significantMovers = movers
+    .filter((m) => typeof m.price_change_percentage_24h === "number")
+    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
+    .slice(0, 6);
+
+  const items = [];
+  const seen = new Set();
+
+  for (const m of significantMovers) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    const pct = m.price_change_percentage_24h;
+    const direction = pct >= 0 ? "up" : "down";
+    const category = inferCategory(m.id, m.symbol);
+    items.push({
+      title: `${m.name} (${m.symbol.toUpperCase()}) is ${direction} ${Math.abs(pct).toFixed(1)}% in the last 24 hours`,
+      summary: `${m.name} is trading at ${formatUsd(m.current_price)} with a market cap of ${formatCompactUsd(
+        m.market_cap
+      )}, ranked #${m.market_cap_rank} by market cap.${trendingIds.has(m.id) ? " It's also currently trending on CoinGecko." : ""}`,
+      category,
+      tags: [m.symbol.toUpperCase(), category],
+      trending: trendingIds.has(m.id) || Math.abs(pct) >= 8,
+    });
+  }
+
+  for (const t of trendingCoins.slice(0, 5)) {
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    const category = inferCategory(t.id, t.symbol);
+    const change = t.data && t.data.price_change_percentage_24h && t.data.price_change_percentage_24h.usd;
+    items.push({
+      title: `${t.name} (${(t.symbol || "").toUpperCase()}) is trending on CoinGecko today`,
+      summary: `${t.name} has climbed among the most-searched coins on CoinGecko in the past 24 hours${
+        typeof change === "number" ? `, with price ${change >= 0 ? "up" : "down"} ${Math.abs(change).toFixed(1)}% over the same period` : ""
+      }.`,
+      category,
+      tags: [(t.symbol || "").toUpperCase(), category, "Trending"],
+      trending: true,
+    });
+  }
+
+  return items;
+}
+
+async function generateAiSummary(movers, trendingResp) {
+  if (!GROQ_API_KEY) throw new Error("GROQ_API_KEY not configured");
+
+  const trendingCoins = (trendingResp.coins || []).map((c) => c.item);
+  const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
+  const topGainers = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h).slice(0, 5);
+  const topLosers = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h).slice(0, 5);
+
+  const dataForPrompt = {
+    topGainers: topGainers.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
+    topLosers: topLosers.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
+    trending: trendingCoins.slice(0, 7).map((t) => ({ name: t.name, symbol: (t.symbol || "").toUpperCase() })),
+  };
+
+  const response = await fetchWithTimeout(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.4,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              'You are a crypto market analyst writing a concise daily briefing for an on-chain intelligence product called Kairon. Only use the numeric facts provided in the user message — never invent coins, numbers, or events not present in the data. Return strict JSON of the shape {"points": ["...", "...", "...", "..."]}. Write 4-5 bullets, each a single sentence under 28 words, focused on what is notable or connects the dots — not just repeating raw numbers.',
+          },
+          { role: "user", content: JSON.stringify(dataForPrompt) },
+        ],
+      }),
+    },
+    15000
+  );
+
+  if (!response.ok) {
+    throw new Error(`Groq API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const content = (data.choices && data.choices[0] && data.choices[0].message.content) || "{}";
+  const parsed = JSON.parse(content);
+  if (!Array.isArray(parsed.points) || parsed.points.length === 0) {
+    throw new Error("Groq returned no summary points");
+  }
+  return parsed.points;
+}
+
+function buildFallbackSummary(movers, trendingResp) {
+  const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
+  const topGainer = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h)[0];
+  const topLoser = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h)[0];
+  const trendingTop = (trendingResp.coins || [])[0] && trendingResp.coins[0].item;
+  const positiveCount = valid.filter((m) => m.price_change_percentage_24h > 0).length;
+
+  const points = [];
+  if (topGainer) points.push(`${topGainer.name} led the top 100 today, up ${topGainer.price_change_percentage_24h.toFixed(1)}% in 24 hours.`);
+  if (topLoser) points.push(`${topLoser.name} was the biggest decliner, down ${Math.abs(topLoser.price_change_percentage_24h).toFixed(1)}%.`);
+  if (trendingTop) points.push(`${trendingTop.name} is today's most-searched coin on CoinGecko.`);
+  points.push(`${positiveCount} of the top 100 coins by market cap are in the green today.`);
+  return points;
+}
+
+let latestSummary = { points: ["Today's briefing is being generated — check back shortly."], generatedAt: null };
+
+app.get("/api/summary", (req, res) => {
+  res.json(latestSummary);
+});
+
+async function generateDailyIntelligence() {
+  try {
+    const [movers, trendingResp] = await Promise.all([fetchTopMarketMovers(), fetchTrendingSearch()]);
+    const built = buildFeedItemsFromMarketData(movers, trendingResp);
+    if (built.length === 0) throw new Error("No feed items generated from market data");
+
+    feedItems = toFeedRecords(built);
+
+    let points;
+    try {
+      points = await generateAiSummary(movers, trendingResp);
+    } catch (err) {
+      console.error("[intelligence] Groq summary failed, using fallback summary:", err.message);
+      points = buildFallbackSummary(movers, trendingResp);
+    }
+    latestSummary = { points, generatedAt: new Date().toISOString() };
+
+    console.log(`[intelligence] refreshed ${feedItems.length} feed items at ${latestSummary.generatedAt}`);
+    await sendDailyDigest();
+  } catch (err) {
+    console.error("[intelligence] generateDailyIntelligence failed, keeping previous data:", err.message);
+  }
+}
+
+function msUntilNextUtcHour(hourUtc) {
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hourUtc, 0, 0, 0));
+  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+  return next.getTime() - now.getTime();
+}
+
+function scheduleDailyIntelligence() {
+  const delay = msUntilNextUtcHour(6);
+  console.log(`[intelligence] next scheduled refresh in ${Math.round(delay / 60000)} minutes`);
+  setTimeout(() => {
+    generateDailyIntelligence();
+    setInterval(generateDailyIntelligence, 24 * 60 * 60 * 1000);
+  }, delay);
+}
+
+// ---------------------------------------------------------------------------
 // Settings API (placeholder)
 //
 // Real per-user settings require verifying a Firebase ID token server-side
@@ -265,6 +474,11 @@ app.post("/api/settings", (req, res) => {
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || "";
 
+// Verifies incoming webhook calls actually come from Telegram (Telegram
+// echoes this back in the X-Telegram-Bot-Api-Secret-Token header on every
+// request once set via setWebhook). Generated fresh on boot.
+const TELEGRAM_WEBHOOK_SECRET = crypto.randomBytes(24).toString("hex");
+
 function isTelegramConfigured() {
   return Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_USERNAME);
 }
@@ -273,12 +487,55 @@ async function callTelegramApi(method, payload) {
   if (!isTelegramConfigured()) return null;
 
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   return response.json();
+}
+
+async function ensureTelegramWebhook() {
+  if (!isTelegramConfigured()) return;
+  try {
+    await callTelegramApi("setWebhook", {
+      url: `${PUBLIC_URL}/api/telegram/webhook`,
+      secret_token: TELEGRAM_WEBHOOK_SECRET,
+    });
+    console.log("[telegram] webhook registered at", `${PUBLIC_URL}/api/telegram/webhook`);
+  } catch (err) {
+    console.error("[telegram] failed to set webhook:", err.message);
+  }
+}
+
+// Sends one consolidated daily digest (today's summary + top signals) to
+// everyone who has messaged the bot, rather than a separate message per
+// feed item. Called automatically at the end of generateDailyIntelligence().
+async function sendDailyDigest() {
+  if (!isTelegramConfigured() || telegramLinks.length === 0) return;
+
+  const topItems = feedItems.slice(0, 3);
+  const lines = [
+    "*Kairon Daily Briefing*",
+    "",
+    ...latestSummary.points.map((p) => `• ${p}`),
+    "",
+    "*Top signals today:*",
+    ...topItems.map((i) => `— ${i.title}`),
+  ];
+
+  for (const link of telegramLinks) {
+    try {
+      await callTelegramApi("sendMessage", {
+        chat_id: link.chatId,
+        text: lines.join("\n"),
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "Open Kairon", url: PUBLIC_URL }]] },
+      });
+    } catch (err) {
+      console.error("[telegram] failed to send daily digest to", link.chatId, err.message);
+    }
+  }
 }
 
 async function sendFeedNotification(chatId, feedItem) {
@@ -326,33 +583,42 @@ app.get("/api/telegram/link", (req, res) => {
 });
 
 // Telegram webhook: receives updates once the bot is configured with
-// setWebhook. Handles "/start <token>" to complete account linking.
+// setWebhook. Handles "/start <token>" to complete account linking to a
+// signed-in Kairon user, or a bare "/start" to subscribe the chat to the
+// daily digest directly (no Kairon account needed yet — this is how
+// standalone subscribers, e.g. before the Settings/Link-Telegram UI is
+// built, start receiving the daily briefing).
 app.post("/api/telegram/webhook", async (req, res) => {
+  if (isTelegramConfigured() && req.get("X-Telegram-Bot-Api-Secret-Token") !== TELEGRAM_WEBHOOK_SECRET) {
+    return res.sendStatus(401);
+  }
+
   const message = req.body && req.body.message;
   const text = message && message.text;
 
   if (text && text.startsWith("/start")) {
     const token = text.split(" ")[1];
     const pending = token && telegramLinkTokens.get(token);
+    const chatId = message.chat.id;
+    const userId = pending ? pending.userId : `tg:${chatId}`;
 
-    if (pending) {
-      telegramLinkTokens.delete(token);
-      telegramLinks = telegramLinks.filter((l) => l.userId !== pending.userId);
-      telegramLinks.push({
-        userId: pending.userId,
-        chatId: message.chat.id,
-        telegramName: [message.from.first_name, message.from.last_name]
-          .filter(Boolean)
-          .join(" "),
-        username: message.from.username || "",
-        linkedAt: new Date().toISOString(),
-      });
+    if (pending) telegramLinkTokens.delete(token);
 
-      await callTelegramApi("sendMessage", {
-        chat_id: message.chat.id,
-        text: "✅ Your Telegram account is now linked to Kairon.",
-      });
-    }
+    telegramLinks = telegramLinks.filter((l) => l.chatId !== chatId);
+    telegramLinks.push({
+      userId,
+      chatId,
+      telegramName: [message.from.first_name, message.from.last_name].filter(Boolean).join(" "),
+      username: message.from.username || "",
+      linkedAt: new Date().toISOString(),
+    });
+
+    await callTelegramApi("sendMessage", {
+      chat_id: chatId,
+      text: pending
+        ? "✅ Your Telegram account is now linked to Kairon."
+        : "✅ You're subscribed to Kairon's daily on-chain briefing — one message every morning at 06:00 UTC.",
+    });
   }
 
   res.sendStatus(200);
@@ -364,14 +630,23 @@ app.get("/api/telegram/status", (req, res) => {
   res.json({ configured: isTelegramConfigured(), linked: Boolean(link), link: link || null });
 });
 
+// Manually forces a refresh of the daily intelligence pipeline — useful for
+// testing without waiting for the 06:00 UTC schedule. Disabled unless
+// ADMIN_SECRET is set in the environment.
+app.post("/api/admin/refresh", async (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret || req.query.secret !== secret) {
+    return res.sendStatus(404);
+  }
+  await generateDailyIntelligence();
+  res.json({ ok: true, items: feedItems.length, summary: latestSummary });
+});
+
 // ---------------------------------------------------------------------------
-// Future: AI news collection, X (Twitter) monitoring, wallet tracking,
-// AI summarization, duplicate detection, and scheduled publishing.
-//
-// Intentionally not implemented yet — see CLAUDE.md → FUTURE FEATURES.
-// This is where a scheduled job would pull from sources, dedupe, summarize
-// via an LLM, and push results into the feed store above (and eventually
-// Firestore) before calling notifyNewFeedItem().
+// Still on the roadmap (not built yet — see CLAUDE.md → FUTURE FEATURES):
+// X (Twitter) monitoring, wallet/smart-money tracking, exchange listing and
+// funding-round data, duplicate detection, scheduled publishing beyond the
+// daily cycle above.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -394,4 +669,9 @@ app.get(/^\/(?!api\/).*/, (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Kairon server running on http://localhost:${PORT}`);
+
+  // Non-blocking: the server starts serving immediately with fallback feed
+  // data, then swaps in real data as soon as the first pipeline run completes.
+  ensureTelegramWebhook();
+  generateDailyIntelligence().then(scheduleDailyIntelligence);
 });

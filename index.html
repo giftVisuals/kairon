@@ -287,6 +287,12 @@
   }
   .card-row::before, .card-row::after { content: ""; flex: none; width: 6px; }
 
+  .row-empty {
+    flex: 1 0 auto; width: 100%; margin: 4px 20px 10px; padding: 26px 20px;
+    border: 1px dashed var(--border-strong); border-radius: var(--radius-md);
+    color: var(--text-faint); font-size: 13.5px; text-align: center;
+  }
+
   .card {
     scroll-snap-align: start;
     flex: 0 0 auto;
@@ -503,7 +509,7 @@
         </div>
         <div class="hero-stats">
           <div class="stat"><span class="stat-value" id="statSignals">--</span><span class="stat-label">Signals today</span></div>
-          <div class="stat"><span class="stat-value">40+</span><span class="stat-label">Sources tracked</span></div>
+          <div class="stat"><span class="stat-value">06:00</span><span class="stat-label">Daily refresh (UTC)</span></div>
           <div class="stat"><span class="stat-value">15</span><span class="stat-label">Categories</span></div>
         </div>
       </div>
@@ -1174,80 +1180,43 @@ async function loadFeed() {
 loadFeed();
 
 /* ------------------------------------------------------------------ *
- * Smart Money / Listings / Funding — mock data.
- * These sections aren't backed by a dedicated API yet (see CLAUDE.md →
- * FUTURE FEATURES: wallet tracking). Rendered from static mock data so
- * the homepage reads as a real product until that lands.
+ * Smart Money / Listings / Funding — no real data source wired up yet
+ * (see CLAUDE.md → FUTURE FEATURES: wallet tracking, exchange listings,
+ * funding data). Rather than show fabricated numbers, these sections are
+ * honest empty states until real data lands.
  * ------------------------------------------------------------------ */
-const smartMoneyMock = [
-  { wallet: "0x9f2…4a1c", label: "Whale · Tracked", action: "buy", token: "ETH", amount: "$2.4M", chain: "Ethereum", time: "12m ago" },
-  { wallet: "8sK4…qP2z", label: "Fund Wallet", action: "sell", token: "SOL", amount: "$860K", chain: "Solana", time: "38m ago" },
-  { wallet: "0x71a…9be2", label: "Whale · Tracked", action: "buy", token: "ARB", amount: "$410K", chain: "Arbitrum", time: "1h ago" },
-  { wallet: "0x4c8…11f0", label: "Smart Money", action: "buy", token: "BASE", amount: "$275K", chain: "Base", time: "2h ago" },
-];
-function smartMoneyCardHTML(w) {
-  return `
-    <article class="card">
-      <div class="card-top"><span class="badge">${w.chain}</span><span class="tag-pill">${w.label}</span></div>
-      <div class="kv-row"><span class="k">Wallet</span><span class="v">${w.wallet}</span></div>
-      <div class="kv-row"><span class="k">Action</span><span class="v ${w.action === "buy" ? "action-buy" : "action-sell"}">${w.action === "buy" ? "Bought" : "Sold"} ${w.token}</span></div>
-      <div class="kv-row"><span class="k">Value</span><span class="v">${w.amount}</span></div>
-      <div class="card-bottom"><span class="card-time">${w.time}</span></div>
-    </article>
-  `;
+function renderComingSoonRow(containerId, message) {
+  document.getElementById(containerId).innerHTML = `<div class="row-empty">${escapeHtml(message)}</div>`;
 }
-
-const listingsMock = [
-  { exchange: "Binance", token: "XYZ", pair: "XYZ/USDT", status: "Live", date: "Today" },
-  { exchange: "Coinbase", token: "ARB", pair: "ARB/USD", status: "Live", date: "Today" },
-  { exchange: "OKX", token: "TIA", pair: "TIA/USDT", status: "Upcoming", date: "In 2 days" },
-  { exchange: "Bybit", token: "PYTH", pair: "PYTH/USDT", status: "Live", date: "Yesterday" },
-];
-function listingCardHTML(l) {
-  return `
-    <article class="card">
-      <div class="card-top"><span class="badge">${l.exchange}</span><span class="tag-pill">${l.status}</span></div>
-      <div class="kv-row"><span class="k">Pair</span><span class="v">${l.pair}</span></div>
-      <div class="kv-row"><span class="k">Token</span><span class="v">${l.token}</span></div>
-      <div class="card-bottom"><span class="card-time">${l.date}</span></div>
-    </article>
-  `;
-}
-
-const fundingMock = [
-  { project: "Restakr Protocol", amount: "$40M", round: "Series A", investors: "a16z crypto, Paradigm", date: "Today" },
-  { project: "ZeroPath Labs", amount: "$12M", round: "Seed", investors: "Coinbase Ventures", date: "2 days ago" },
-  { project: "Modular Chain", amount: "$25M", round: "Series A", investors: "Polychain, Multicoin", date: "3 days ago" },
-];
-function fundingCardHTML(f) {
-  return `
-    <article class="card">
-      <div class="card-top"><span class="badge">${f.round}</span></div>
-      <h3 class="card-title">${f.project}</h3>
-      <div class="kv-row"><span class="k">Raised</span><span class="v">${f.amount}</span></div>
-      <p class="card-summary">Investors: ${f.investors}</p>
-      <div class="card-bottom"><span class="card-time">${f.date}</span></div>
-    </article>
-  `;
-}
-
-document.getElementById("row-smartmoney").innerHTML = smartMoneyMock.map(smartMoneyCardHTML).join("");
-document.getElementById("row-listings").innerHTML = listingsMock.map(listingCardHTML).join("");
-document.getElementById("row-funding").innerHTML = fundingMock.map(fundingCardHTML).join("");
+renderComingSoonRow("row-smartmoney", "Wallet-tracking data is coming soon — this section will show real smart money activity.");
+renderComingSoonRow("row-listings", "Live exchange listing data is coming soon.");
+renderComingSoonRow("row-funding", "Live funding round data is coming soon.");
 
 /* ------------------------------------------------------------------ *
- * AI Market Summary — mock summary until real AI summarization lands.
+ * AI Market Summary — real summary generated server-side (Groq) from
+ * live market data, refreshed daily. See GET /api/summary.
  * ------------------------------------------------------------------ */
-const aiSummaryPoints = [
-  "Ethereum ETF inflows extended to a fourth straight week, signaling steady institutional accumulation.",
-  "Base memecoin activity is driving a broader rotation into low-cap L2 tokens.",
-  "Bitcoin dominance remains elevated, suggesting the market is still in a majors-led phase.",
-  "Funding activity is concentrating around restaking and modular infrastructure.",
-];
-document.getElementById("aiSummaryCard").innerHTML = `
-  <div class="ai-summary-meta"><span class="dot"></span> Generated by Kairon AI · Updated today at 06:00 UTC</div>
-  <ul class="ai-summary-list">${aiSummaryPoints.map((p) => `<li>${p}</li>`).join("")}</ul>
-`;
+function renderSummary(data) {
+  const points = data.points && data.points.length ? data.points : ["Today's briefing is being generated — check back shortly."];
+  const updated = data.generatedAt ? `Updated ${timeAgo(data.generatedAt)}` : "Generating…";
+  document.getElementById("aiSummaryCard").innerHTML = `
+    <div class="ai-summary-meta"><span class="dot"></span> Generated by Kairon AI · ${updated}</div>
+    <ul class="ai-summary-list">${points.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ul>
+  `;
+}
+
+async function loadSummary() {
+  try {
+    const res = await fetch("/api/summary");
+    const data = await res.json();
+    renderSummary(data);
+  } catch (err) {
+    console.error("Failed to load AI summary:", err);
+    renderSummary({ points: [], generatedAt: null });
+  }
+}
+loadSummary();
+
 document.getElementById("heroSummaryBtn").addEventListener("click", () => {
   document.getElementById("aiSummaryCard").scrollIntoView({ behavior: "smooth", block: "center" });
 });
