@@ -581,9 +581,16 @@ function buildFeedItemsFromMarketData(movers, trending) {
     });
   }
 
+  // Memecoins first, then by size of move — this audience trades
+  // memecoins, so a 6% BNB move shouldn't bury a 40% PEPE move.
   const significantMovers = movers
     .filter((m) => typeof m.price_change_percentage_24h === "number" && !seen.has(m.id))
-    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
+    .sort((a, b) => {
+      const aMeme = MEME_SYMBOLS.has((a.symbol || "").toLowerCase()) ? 1 : 0;
+      const bMeme = MEME_SYMBOLS.has((b.symbol || "").toLowerCase()) ? 1 : 0;
+      if (aMeme !== bMeme) return bMeme - aMeme;
+      return Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h);
+    })
     .slice(0, 12);
 
   for (const m of significantMovers) {
@@ -606,7 +613,11 @@ function buildFeedItemsFromMarketData(movers, trending) {
     if (seen.has(t.id)) continue;
     seen.add(t.id);
     let category = inferCategory(t.id, t.symbol.toLowerCase());
-    if (category === "Macro" && t.source === "geckoterminal") category = "Solana";
+    // GeckoTerminal's Solana trending pools are, in practice, almost always
+    // degen memecoins, not L1-ecosystem news — tagging them "Memecoins"
+    // (not "Solana") is what makes the category filter actually useful for
+    // a memecoin trader, instead of burying them under a generic label.
+    if (category === "Macro" && t.source === "geckoterminal") category = "Memecoins";
     // volumeUsd24h is real on-chain DEX trading volume from GeckoTerminal
     // (not a CoinGecko price stat) — surfacing it is the difference between
     // "this token's price moved" and "here's the on-chain activity behind
@@ -637,11 +648,19 @@ async function generateAiSummary(movers, trending) {
   const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
   const topGainers = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h).slice(0, 5);
   const topLosers = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h).slice(0, 5);
+  const memecoins = valid
+    .filter((m) => MEME_SYMBOLS.has((m.symbol || "").toLowerCase()))
+    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
+    .slice(0, 6);
 
   const dataForPrompt = {
+    // trending is GeckoTerminal's Solana trending pools — almost entirely
+    // degen memecoins — plus memecoins is the top-100 memecoin movers by
+    // name. Listed first/separately since this audience trades memecoins.
+    trending: trending.slice(0, 8).map((t) => ({ name: t.name, symbol: t.symbol, change24h: t.change24h })),
+    memecoins: memecoins.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
     topGainers: topGainers.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
     topLosers: topLosers.map((m) => ({ name: m.name, symbol: m.symbol.toUpperCase(), change24h: Number(m.price_change_percentage_24h.toFixed(2)) })),
-    trending: trending.slice(0, 7).map((t) => ({ name: t.name, symbol: t.symbol })),
   };
 
   const response = await fetchWithTimeout(
@@ -657,7 +676,7 @@ async function generateAiSummary(movers, trending) {
           {
             role: "system",
             content:
-              'You are a crypto market analyst writing a concise daily briefing for an on-chain intelligence product called Kairon. Only use the numeric facts provided in the user message — never invent coins, numbers, or events not present in the data. Return strict JSON of the shape {"points": ["...", "...", "...", "..."]}. Write 4-5 bullets, each a single sentence under 28 words. Never write a tautology that is trivially true by construction (e.g. "gainers outpaced losers" on a green day, or "the market was mixed") — every bullet must state a specific fact (a name, a number, a comparison) that a reader could not have guessed without seeing the data. If a bullet does not name at least one specific coin or number, rewrite it.',
+              'You are a crypto market analyst writing a concise daily briefing for an on-chain intelligence product called Kairon, for an audience of memecoin and degen traders. Only use the numeric facts provided in the user message — never invent coins, numbers, or events not present in the data. Return strict JSON of the shape {"points": ["...", "...", "...", "..."]}. Write 4-5 bullets, each a single sentence under 28 words. Prioritize the "trending" and "memecoins" data first — at least 3 of the bullets must be about specific memecoins/trending tokens, naming the coin and its move. Only use "topGainers"/"topLosers" (mostly large-cap coins) for at most 1 bullet of brief context. Never write a tautology that is trivially true by construction (e.g. "gainers outpaced losers" on a green day, or "the market was mixed") — every bullet must state a specific fact (a name, a number, a comparison) that a reader could not have guessed without seeing the data. If a bullet does not name at least one specific coin or number, rewrite it.',
           },
           { role: "user", content: JSON.stringify(dataForPrompt) },
         ],
@@ -684,12 +703,17 @@ function buildFallbackSummary(movers, trending) {
   const topGainer = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h)[0];
   const topLoser = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h)[0];
   const trendingTop = trending[0];
+  const trendingSecond = trending[1];
   const positiveCount = valid.filter((m) => m.price_change_percentage_24h > 0).length;
 
   const points = [];
+  if (trendingTop) {
+    const changeText = typeof trendingTop.change24h === "number" ? `, ${trendingTop.change24h >= 0 ? "up" : "down"} ${Math.abs(trendingTop.change24h).toFixed(1)}%` : "";
+    points.push(`${trendingTop.name} (${trendingTop.symbol}) is today's top trending memecoin${changeText}.`);
+  }
+  if (trendingSecond) points.push(`${trendingSecond.name} (${trendingSecond.symbol}) is also seeing a real pickup in on-chain trading activity.`);
   if (topGainer) points.push(`${topGainer.name} led the top 100 today, up ${topGainer.price_change_percentage_24h.toFixed(1)}% in 24 hours.`);
   if (topLoser) points.push(`${topLoser.name} was the biggest decliner, down ${Math.abs(topLoser.price_change_percentage_24h).toFixed(1)}%.`);
-  if (trendingTop) points.push(`${trendingTop.name} is today's top trending token right now.`);
   points.push(`${positiveCount} of the top 100 coins by market cap are in the green today.`);
   return points;
 }
@@ -740,7 +764,12 @@ function buildFallbackCoinAnalyses(coins) {
 function selectTopInterestingCoins(movers, trending) {
   const significantMovers = movers
     .filter((m) => typeof m.price_change_percentage_24h === "number" && !MAJOR_IDS.includes(m.id))
-    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
+    .sort((a, b) => {
+      const aMeme = MEME_SYMBOLS.has((a.symbol || "").toLowerCase()) ? 1 : 0;
+      const bMeme = MEME_SYMBOLS.has((b.symbol || "").toLowerCase()) ? 1 : 0;
+      if (aMeme !== bMeme) return bMeme - aMeme;
+      return Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h);
+    })
     .slice(0, 4)
     .map((m) => ({
       id: m.id,
@@ -754,7 +783,11 @@ function selectTopInterestingCoins(movers, trending) {
 
   const trendingTop = trending.slice(0, 3).map((t) => {
     let category = inferCategory(t.id, t.symbol.toLowerCase());
-    if (category === "Macro" && t.source === "geckoterminal") category = "Solana";
+    // GeckoTerminal's Solana trending pools are, in practice, almost always
+    // degen memecoins, not L1-ecosystem news — tagging them "Memecoins"
+    // (not "Solana") is what makes the category filter actually useful for
+    // a memecoin trader, instead of burying them under a generic label.
+    if (category === "Macro" && t.source === "geckoterminal") category = "Memecoins";
     return {
       id: t.id,
       name: t.name,
@@ -766,9 +799,12 @@ function selectTopInterestingCoins(movers, trending) {
     };
   });
 
+  // trendingTop first — it's almost entirely real degen memecoin activity
+  // (GeckoTerminal), which is what this audience actually wants explained.
+  // Putting it after significantMovers risked it getting sliced off.
   const seen = new Set();
   const combined = [];
-  for (const c of [...significantMovers, ...trendingTop]) {
+  for (const c of [...trendingTop, ...significantMovers]) {
     if (seen.has(c.id)) continue;
     seen.add(c.id);
     combined.push(c);
