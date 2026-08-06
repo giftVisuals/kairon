@@ -546,69 +546,23 @@ function buildMarketSnapshot(movers, trendingResp) {
   return { topGainers, topLosers, trending, updatedAt: new Date().toISOString() };
 }
 
-// Funding Rounds — DefiLlama's public "raises" endpoint (free, no key).
+// Funding Rounds and Exchange Listings: both previously tried free
+// endpoints (DefiLlama's /raises, CoinGecko's /status_updates) that turned
+// out not to actually be free/available in production (402 and 404
+// respectively — confirmed live, not reachable to verify from local dev).
+// Rather than leave them silently broken, these stay as honest "coming
+// soon" states on the frontend (see index.html) until a real data source
+// (paid or otherwise) is wired up. See CLAUDE.md → FUTURE FEATURES.
 let latestFundingRounds = [];
+let latestExchangeListings = [];
 
 app.get("/api/funding", (req, res) => {
   res.json({ items: latestFundingRounds });
 });
 
-async function fetchFundingRounds() {
-  const res = await fetchWithTimeout("https://api.llama.fi/raises", { headers: { Accept: "application/json" } }, 10000);
-  if (!res.ok) throw new Error(`DefiLlama raises error: ${res.status}`);
-  return res.json();
-}
-
-function buildFundingRows(raisesResp) {
-  const raises = (raisesResp && raisesResp.raises) || [];
-  return [...raises]
-    .filter((r) => r && r.name && r.date)
-    .sort((a, b) => b.date - a.date)
-    .slice(0, 8)
-    .map((r) => {
-      const investors = [...(r.leadInvestors || []), ...(r.otherInvestors || [])].filter(Boolean);
-      return {
-        project: r.name,
-        amount: typeof r.amount === "number" && r.amount > 0 ? `$${r.amount}M` : "Undisclosed",
-        round: r.round || "Funding round",
-        investors: investors.length > 0 ? investors.slice(0, 4).join(", ") : "Undisclosed",
-        date: new Date(r.date * 1000).toISOString(),
-      };
-    });
-}
-
-// Exchange Listings — CoinGecko's public status_updates feed, filtered to
-// the exchange_listing category (free, no key). These are project-submitted
-// announcements, not a curated "just landed on Binance" feed, so quality
-// varies — but it's real, live data rather than another fabricated section.
-let latestExchangeListings = [];
-
 app.get("/api/listings", (req, res) => {
   res.json({ items: latestExchangeListings });
 });
-
-async function fetchExchangeListingUpdates() {
-  const res = await fetchWithTimeout(
-    "https://api.coingecko.com/api/v3/status_updates?category=exchange_listing&per_page=10&page=1",
-    { headers: { Accept: "application/json" } },
-    10000
-  );
-  if (!res.ok) throw new Error(`CoinGecko status_updates error: ${res.status}`);
-  return res.json();
-}
-
-function buildListingRows(statusResp) {
-  const updates = (statusResp && statusResp.status_updates) || [];
-  return updates
-    .filter((u) => u && u.project)
-    .slice(0, 8)
-    .map((u) => ({
-      project: u.project.name || u.project.symbol || "Unknown project",
-      symbol: (u.project.symbol || "").toUpperCase(),
-      description: (u.description || "").slice(0, 160),
-      date: u.created_at || new Date().toISOString(),
-    }));
-}
 
 // Persists the current in-memory snapshot to Firestore's feed/latest doc.
 // Called after every regeneration so the next boot can load real data
@@ -672,22 +626,6 @@ async function generateDailyIntelligence() {
     console.log(`[intelligence] refreshed ${feedItems.length} feed items at ${latestSummary.generatedAt}`);
   } catch (err) {
     console.error("[intelligence] generateDailyIntelligence failed, keeping previous data:", err.message);
-  }
-
-  // Independent of the block above: a DefiLlama or CoinGecko hiccup here
-  // shouldn't affect the main feed/summary that already succeeded.
-  try {
-    latestFundingRounds = buildFundingRows(await fetchFundingRounds());
-    console.log(`[intelligence] refreshed ${latestFundingRounds.length} funding rounds`);
-  } catch (err) {
-    console.error("[intelligence] funding rounds refresh failed, keeping previous data:", err.message);
-  }
-
-  try {
-    latestExchangeListings = buildListingRows(await fetchExchangeListingUpdates());
-    console.log(`[intelligence] refreshed ${latestExchangeListings.length} exchange listing updates`);
-  } catch (err) {
-    console.error("[intelligence] exchange listings refresh failed, keeping previous data:", err.message);
   }
 
   await saveIntelligenceSnapshot();
