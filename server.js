@@ -429,7 +429,7 @@ async function fetchGeckoTerminalTrending() {
       volumeUsd24h: attrs.volume_usd && attrs.volume_usd.h24 ? Number(attrs.volume_usd.h24) : null,
       source: "geckoterminal",
     });
-    if (results.length >= 10) break;
+    if (results.length >= 15) break;
   }
 
   if (results.length === 0) throw new Error("No trending pools resolved to token data");
@@ -503,6 +503,55 @@ function buildRobinhoodFeedItem(quote) {
   };
 }
 
+// Real on-chain activity (not price data) for Solana tokens, via Helius's
+// Enhanced Transactions API. This is the actual "on-chain" part of "on-chain
+// intelligence" — a count of real, recent transactions/swaps involving the
+// token's mint address, as opposed to CoinGecko/GeckoTerminal price and
+// volume stats. Solana-only (Helius doesn't cover Bitcoin/Ethereum), and
+// only applied to GeckoTerminal-sourced trending picks, since those are the
+// only ones we have a real mint address for. HELIUS_API_KEY: already added
+// to Railway (it was originally provisioned for a smart-money feature we
+// decided to cut — reused here for a lighter-weight signal instead). Not
+// verifiable from this sandbox (helius.xyz is blocked here too) — confirm
+// via Railway logs after deploy.
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
+
+async function fetchOnChainActivity(mintAddress) {
+  if (!HELIUS_API_KEY) throw new Error("HELIUS_API_KEY not configured");
+  const res = await fetchWithTimeout(
+    `https://api.helius.xyz/v0/addresses/${mintAddress}/transactions?api-key=${HELIUS_API_KEY}&limit=50`,
+    { headers: { Accept: "application/json" } },
+    10000
+  );
+  if (!res.ok) throw new Error(`Helius transactions error: ${res.status}`);
+  const txs = await res.json();
+  if (!Array.isArray(txs)) throw new Error("Helius returned an unexpected response shape");
+
+  const oneHourAgoSec = Date.now() / 1000 - 3600;
+  const recent = txs.filter((t) => typeof t.timestamp === "number" && t.timestamp >= oneHourAgoSec);
+  const swapCount = recent.filter((t) => t.type === "SWAP").length;
+
+  return { transactionCount: recent.length, swapCount };
+}
+
+// Adds a real on-chain activity stat to any coin in the list that has a
+// Solana mint address (only GeckoTerminal-sourced trending picks do).
+// Independent per-coin — one Helius failure doesn't drop the others.
+async function enrichWithOnChainActivity(coins) {
+  return Promise.all(
+    coins.map(async (c) => {
+      if (c.trendingSource !== "organic DEX trading activity") return c;
+      try {
+        const onChainActivity = await fetchOnChainActivity(c.id);
+        return { ...c, onChainActivity };
+      } catch (err) {
+        console.error(`[intelligence] on-chain activity fetch failed for ${c.symbol}:`, err.message);
+        return c;
+      }
+    })
+  );
+}
+
 // BTC/ETH/SOL always appear in the feed and Insights regardless of whether
 // they're among the biggest movers — they're the reference points every
 // trader checks first, and a pure "sorted by % change" list tends to bury
@@ -535,7 +584,7 @@ function buildFeedItemsFromMarketData(movers, trending) {
   const significantMovers = movers
     .filter((m) => typeof m.price_change_percentage_24h === "number" && !seen.has(m.id))
     .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
-    .slice(0, 6);
+    .slice(0, 12);
 
   for (const m of significantMovers) {
     seen.add(m.id);
@@ -553,17 +602,25 @@ function buildFeedItemsFromMarketData(movers, trending) {
     });
   }
 
-  for (const t of trending.slice(0, 5)) {
+  for (const t of trending.slice(0, 8)) {
     if (seen.has(t.id)) continue;
     seen.add(t.id);
     let category = inferCategory(t.id, t.symbol.toLowerCase());
     if (category === "Macro" && t.source === "geckoterminal") category = "Solana";
+    // volumeUsd24h is real on-chain DEX trading volume from GeckoTerminal
+    // (not a CoinGecko price stat) — surfacing it is the difference between
+    // "this token's price moved" and "here's the on-chain activity behind
+    // it," so it's worth stating explicitly rather than folding it into a
+    // generic trending blurb.
+    const onChainLabel = t.source === "geckoterminal" ? "on-chain DEX trading" : "search interest";
     const sourceLabel = t.source === "geckoterminal" ? "GeckoTerminal" : "CoinGecko";
     const change = t.change24h;
     items.push({
       title: `${t.name} (${t.symbol}) is trending on ${sourceLabel} today`,
-      summary: `${t.name} is trending on ${sourceLabel}${
-        typeof change === "number" ? `, with price ${change >= 0 ? "up" : "down"} ${Math.abs(change).toFixed(1)}% over the last 24 hours` : ""
+      summary: `${t.name} is trending on ${sourceLabel}, driven by real ${onChainLabel} activity${
+        typeof change === "number" ? `. Price is ${change >= 0 ? "up" : "down"} ${Math.abs(change).toFixed(1)}% over the last 24 hours` : ""
+      }${
+        typeof t.volumeUsd24h === "number" ? `, with ${formatCompactUsd(t.volumeUsd24h)} in on-chain trading volume in that time` : ""
       }.`,
       category,
       tags: [t.symbol, category, "Trending"],
@@ -600,7 +657,7 @@ async function generateAiSummary(movers, trending) {
           {
             role: "system",
             content:
-              'You are a crypto market analyst writing a concise daily briefing for an on-chain intelligence product called Kairon. Only use the numeric facts provided in the user message — never invent coins, numbers, or events not present in the data. Return strict JSON of the shape {"points": ["...", "...", "...", "..."]}. Write 4-5 bullets, each a single sentence under 28 words, focused on what is notable or connects the dots — not just repeating raw numbers.',
+              'You are a crypto market analyst writing a concise daily briefing for an on-chain intelligence product called Kairon. Only use the numeric facts provided in the user message — never invent coins, numbers, or events not present in the data. Return strict JSON of the shape {"points": ["...", "...", "...", "..."]}. Write 4-5 bullets, each a single sentence under 28 words. Never write a tautology that is trivially true by construction (e.g. "gainers outpaced losers" on a green day, or "the market was mixed") — every bullet must state a specific fact (a name, a number, a comparison) that a reader could not have guessed without seeing the data. If a bullet does not name at least one specific coin or number, rewrite it.',
           },
           { role: "user", content: JSON.stringify(dataForPrompt) },
         ],
@@ -637,6 +694,38 @@ function buildFallbackSummary(movers, trending) {
   return points;
 }
 
+// Deterministic fallback for the AI Coin Breakdown if Groq is unavailable —
+// mirrors buildFallbackSummary's role for the market summary. Without this,
+// a single failed Groq call leaves latestCoinAnalyses at [] indefinitely
+// (it's only ever overwritten on a successful generation), which is exactly
+// the "being generated, check back shortly" empty state that's the single
+// biggest thing wrong with showing this site to a paying customer.
+function buildFallbackCoinAnalyses(coins) {
+  return coins.map((c) => {
+    const changeKnown = typeof c.change24h === "number";
+    const moveText = changeKnown ? `${c.change24h >= 0 ? "up" : "down"} ${Math.abs(c.change24h).toFixed(1)}%` : "moving";
+    const reasonText = c.trendingSource
+      ? `alongside a pickup in ${c.trendingSource}`
+      : "alongside broader market movement";
+    const onChainText = c.onChainActivity
+      ? ` On-chain, it saw ${c.onChainActivity.transactionCount} transactions (${c.onChainActivity.swapCount} swaps) in the last hour.`
+      : "";
+    return {
+      id: c.id,
+      name: c.name,
+      symbol: c.symbol,
+      change24h: c.change24h,
+      category: c.category,
+      onChainActivity: c.onChainActivity || null,
+      whyItMoved: `${c.name} is ${moveText} today, ${reasonText}.${onChainText} We don't have a confirmed news catalyst for this move — this is what the data shows, not a specific story.`,
+      whatCouldHappenNext:
+        "Watch whether trading activity keeps up — moves that fade in volume tend to fade in price too, while sustained activity is more likely to hold.",
+      howToApproachIt:
+        "Treat this as high-risk, especially on a fast or large move — size accordingly, expect thin liquidity on smaller-cap names, and be cautious about chasing a candle that's already extended.",
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // AI Coin Breakdown — a plain-language "why did this move, what could
 // happen next, how should I think about it" explanation for the day's most
@@ -652,7 +741,7 @@ function selectTopInterestingCoins(movers, trending) {
   const significantMovers = movers
     .filter((m) => typeof m.price_change_percentage_24h === "number" && !MAJOR_IDS.includes(m.id))
     .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
-    .slice(0, 3)
+    .slice(0, 4)
     .map((m) => ({
       id: m.id,
       name: m.name,
@@ -663,7 +752,7 @@ function selectTopInterestingCoins(movers, trending) {
       trendingSource: null,
     }));
 
-  const trendingTop = trending.slice(0, 2).map((t) => {
+  const trendingTop = trending.slice(0, 3).map((t) => {
     let category = inferCategory(t.id, t.symbol.toLowerCase());
     if (category === "Macro" && t.source === "geckoterminal") category = "Solana";
     return {
@@ -684,7 +773,7 @@ function selectTopInterestingCoins(movers, trending) {
     seen.add(c.id);
     combined.push(c);
   }
-  return combined.slice(0, 4);
+  return combined.slice(0, 6);
 }
 
 async function generateCoinAnalyses(coins) {
@@ -705,8 +794,8 @@ async function generateCoinAnalyses(coins) {
             role: "system",
             content: [
               "You write short, beginner-friendly breakdowns of individual crypto tokens for an on-chain intelligence product called Kairon.",
-              "You are given ONLY each token's name, symbol, category, 24h price change, market cap rank (if known), and why it was flagged (a big price move, or trending, and if trending, whether that's from organic DEX trading activity or CoinGecko search interest).",
-              "You do NOT have real news or on-chain event data. Never invent a specific catalyst, headline, listing, or event you were not given — if you don't actually know the cause, describe it honestly in terms of the signal you do have (e.g. 'this lines up with a burst of trading activity' rather than fabricating a reason).",
+              "You are given each token's name, symbol, category, 24h price change, market cap rank (if known), why it was flagged (a big price move, or trending, and if trending, whether that's from organic DEX trading activity or CoinGecko search interest), and sometimes an onChainActivity field with real Solana transaction counts from the last hour (transactionCount, swapCount) — that field is real on-chain data, not a price stat, so when it's present, reference it naturally as supporting evidence.",
+              "You do NOT have real news or on-chain event data beyond what's given. Never invent a specific catalyst, headline, listing, or event you were not given, and never state a number that isn't in the data you were given — if you don't actually know the cause, describe it honestly in terms of the signal you do have (e.g. 'this lines up with a burst of trading activity' rather than fabricating a reason).",
               "This is educational context, not financial advice. Never tell the reader to buy or sell, and never give a price target. For 'howToApproachIt', focus on: what would confirm the move is continuing vs fading, and real risk considerations (volatility, thin liquidity on small/micro caps, chasing a move that's already extended).",
               'Return strict JSON of the shape: {"analyses": [{"id": "...", "whyItMoved": "...", "whatCouldHappenNext": "...", "howToApproachIt": "..."}]}. One object per coin given, in the same order. Each field 1-2 short sentences, plain simple language, explain any jargon you use.',
             ].join(" "),
@@ -738,6 +827,10 @@ async function generateCoinAnalyses(coins) {
         symbol: c.symbol,
         change24h: c.change24h,
         category: c.category,
+        // Echoed straight from our own fetch, not from the model — Groq may
+        // reference it in prose, but the number shown on the card is real,
+        // not an LLM restatement of it.
+        onChainActivity: c.onChainActivity || null,
         whyItMoved: a.whyItMoved,
         whatCouldHappenNext: a.whatCouldHappenNext || null,
         howToApproachIt: a.howToApproachIt || null,
@@ -868,26 +961,38 @@ async function generateDailyIntelligence() {
     latestSummary = { points, generatedAt: new Date().toISOString() };
 
     try {
-      const topCoins = selectTopInterestingCoins(movers, trending);
-      let analyses = await generateCoinAnalyses(topCoins);
+      const topCoins = await enrichWithOnChainActivity(selectTopInterestingCoins(movers, trending));
+
+      let analyses;
+      try {
+        analyses = await generateCoinAnalyses(topCoins);
+      } catch (err) {
+        // No fallback here means "being generated, check back shortly"
+        // forever if Groq has a bad day — this is what a paying customer
+        // would actually see, so it always resolves to real content.
+        console.error("[intelligence] Groq coin analysis failed, using fallback analyses:", err.message);
+        analyses = buildFallbackCoinAnalyses(topCoins);
+      }
 
       if (robinhoodQuote) {
+        const robinhoodCoin = {
+          id: "robinhood-hood",
+          name: "Robinhood",
+          symbol: "HOOD",
+          change24h: Number((robinhoodQuote.dp || 0).toFixed(2)),
+          category: "Robinhood",
+          marketCapRank: null,
+          trendingSource: null,
+        };
+        let robinhoodAnalysis;
         try {
-          const robinhoodCoin = {
-            id: "robinhood-hood",
-            name: "Robinhood",
-            symbol: "HOOD",
-            change24h: Number((robinhoodQuote.dp || 0).toFixed(2)),
-            category: "Robinhood",
-            marketCapRank: null,
-            trendingSource: null,
-          };
-          const [robinhoodAnalysis] = await generateCoinAnalyses([robinhoodCoin]);
-          // Prepended, not appended — 0xRiver flagged Robinhood as "very very important."
-          if (robinhoodAnalysis) analyses = [robinhoodAnalysis, ...analyses];
+          [robinhoodAnalysis] = await generateCoinAnalyses([robinhoodCoin]);
         } catch (err) {
-          console.error("[intelligence] Robinhood coin analysis failed:", err.message);
+          console.error("[intelligence] Robinhood coin analysis failed, using fallback:", err.message);
+          [robinhoodAnalysis] = buildFallbackCoinAnalyses([robinhoodCoin]);
         }
+        // Prepended, not appended — 0xRiver flagged Robinhood as "very very important."
+        if (robinhoodAnalysis) analyses = [robinhoodAnalysis, ...analyses];
       }
 
       latestCoinAnalyses = analyses;

@@ -310,6 +310,19 @@
   }
   .analysis-text { font-size: 13.5px; color: var(--text); line-height: 1.55; }
 
+  /* Real on-chain activity stat (Helius) — deliberately visually distinct
+     from the AI-written blocks below it: this is fetched data, not a
+     model's paraphrase of it. */
+  .onchain-badge {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+    padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent);
+    font-size: 12.5px; color: var(--accent-strong);
+  }
+  .onchain-badge svg { width: 14px; height: 14px; flex: none; }
+  .onchain-badge strong { font-weight: 800; }
+  .onchain-dot { opacity: 0.5; }
+  .onchain-window { color: var(--text-faint); font-weight: 500; margin-left: auto; }
+
   /* Listen (text-to-speech) button — AI Market Summary + AI Coin Breakdown */
   .listen-btn {
     align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
@@ -1491,7 +1504,7 @@ function feedCardHTML(item) {
     <article class="card" data-id="${item.id}">
       <div class="card-top">
         <span class="badge">${escapeHtml(item.category)}</span>
-        ${item.trending ? `<span class="trend-dot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 17l6-6 4 4 8-8"/></svg>Trending</span>` : ""}
+        ${item.trending ? `<span class="trend-dot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 17l6-6 4 4 8-8"/></svg>${item.tags && item.tags.includes("Trending") ? "Trending" : "Big Move"}</span>` : ""}
       </div>
       <h3 class="card-title">${escapeHtml(item.title)}</h3>
       <p class="card-summary">${escapeHtml(item.summary)}</p>
@@ -1530,11 +1543,19 @@ function renderFeedRow(containerId, items) {
   items.forEach((item) => bindFeedCard(el.querySelector(`[data-id="${item.id}"]`), item));
 }
 
+// Each row pulls a genuinely different slice of feedCache instead of
+// overlapping views of the same handful of items: Latest Intelligence is
+// everything in publish order; Trending Narratives is only items actually
+// sourced from the trending endpoint (tagged "Trending" — not just any
+// large mover); Ecosystem Highlights is everything else (broader market
+// movers that aren't majors or trending picks).
 function renderAllFeedRows() {
   if (feedCache.length === 0) return;
+  const isTrending = (i) => i.tags && i.tags.includes("Trending");
+  const isMajor = (i) => i.tags && i.tags.includes("Majors");
   renderFeedRow("row-latest", feedCache.slice(0, 8));
-  renderFeedRow("row-trending", feedCache.filter((i) => i.trending));
-  renderFeedRow("row-ecosystem", [...feedCache].reverse().slice(0, 6));
+  renderFeedRow("row-trending", feedCache.filter(isTrending));
+  renderFeedRow("row-ecosystem", feedCache.filter((i) => !isTrending(i) && !isMajor(i)));
   if (!document.getElementById("view-feed").classList.contains("hidden")) renderFeedGrid();
 }
 
@@ -1722,6 +1743,14 @@ function analysisCardHTML(item) {
         <span><span class="analysis-coin-name">${escapeHtml(item.name)}</span><span class="analysis-coin-symbol">${escapeHtml(item.symbol)}</span></span>
         <span class="insight-change ${changeClass}">${changeText}</span>
       </div>
+      ${item.onChainActivity ? `
+      <div class="onchain-badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        <span><strong>${item.onChainActivity.transactionCount}</strong> on-chain transactions</span>
+        <span class="onchain-dot">·</span>
+        <span><strong>${item.onChainActivity.swapCount}</strong> swaps</span>
+        <span class="onchain-window">last hour, live from Solana</span>
+      </div>` : ""}
       <div class="analysis-block">
         <span class="analysis-label">Why it moved</span>
         <p class="analysis-text">${escapeHtml(item.whyItMoved)}</p>
@@ -1755,7 +1784,9 @@ async function loadCoinAnalysis() {
       const item = data.items[i];
       const btn = card.querySelector(".analysis-listen-btn");
       if (!btn || !item) return;
-      const parts = [`${item.name}, ${item.symbol}.`, `Why it moved: ${item.whyItMoved}`];
+      const parts = [`${item.name}, ${item.symbol}.`];
+      if (item.onChainActivity) parts.push(`On-chain in the last hour: ${item.onChainActivity.transactionCount} transactions, ${item.onChainActivity.swapCount} swaps.`);
+      parts.push(`Why it moved: ${item.whyItMoved}`);
       if (item.whatCouldHappenNext) parts.push(`What could happen next: ${item.whatCouldHappenNext}`);
       if (item.howToApproachIt) parts.push(`How to approach it: ${item.howToApproachIt}`);
       btn.addEventListener("click", () => speakText(parts.join(" "), btn));
