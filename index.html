@@ -1210,8 +1210,7 @@ loadFirebase()
     fb.onAuthStateChanged(fb.auth, (user) => {
       currentUser = user;
       renderAuthUI(user);
-      bookmarks = loadBookmarks(user);
-      renderAllFeedRows();
+      loadBookmarksFromServer();
     });
   })
   .catch((err) => {
@@ -1220,25 +1219,66 @@ loadFirebase()
   });
 
 /* ------------------------------------------------------------------ *
- * Bookmarks (client-side placeholder — persistence lands with the
- * Feed + Bookmarks feature; this keeps the UI honest in the meantime)
+ * Bookmarks — persisted server-side in Firestore, keyed to the signed-in
+ * Firebase user. Attaches the user's ID token so the server can verify
+ * who's calling rather than trusting a client-supplied id.
  * ------------------------------------------------------------------ */
-function bookmarkKey(user) { return `kairon-bookmarks-${user ? user.uid : "guest"}`; }
-function loadBookmarks(user) {
-  if (!user) return new Set();
-  try { return new Set(JSON.parse(localStorage.getItem(bookmarkKey(user)) || "[]")); }
-  catch { return new Set(); }
+async function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (currentUser) {
+    try {
+      const fb = await loadFirebase();
+      headers.Authorization = `Bearer ${await fb.auth.currentUser.getIdToken()}`;
+    } catch (err) {
+      console.error("Failed to attach auth token:", err);
+    }
+  }
+  return fetch(url, { ...options, headers });
 }
-function saveBookmarks(user) {
-  if (!user) return;
-  localStorage.setItem(bookmarkKey(user), JSON.stringify([...bookmarks]));
-}
-function toggleBookmark(item) {
-  requireAuth(() => {
-    if (bookmarks.has(item.id)) { bookmarks.delete(item.id); toast("Removed bookmark."); }
-    else { bookmarks.add(item.id); toast("Saved to bookmarks."); }
-    saveBookmarks(currentUser);
+
+async function loadBookmarksFromServer() {
+  if (!currentUser) {
+    bookmarks = new Set();
     renderAllFeedRows();
+    return;
+  }
+  try {
+    const res = await apiFetch("/api/bookmarks");
+    if (!res.ok) throw new Error(`Failed to load bookmarks (${res.status})`);
+    const data = await res.json();
+    bookmarks = new Set(data.itemIds || []);
+  } catch (err) {
+    console.error("Failed to load bookmarks:", err);
+    bookmarks = new Set();
+  }
+  renderAllFeedRows();
+}
+
+function toggleBookmark(item) {
+  requireAuth(async () => {
+    const wasBookmarked = bookmarks.has(item.id);
+    // Optimistic update — reverted below if the server call fails.
+    if (wasBookmarked) bookmarks.delete(item.id);
+    else bookmarks.add(item.id);
+    renderAllFeedRows();
+
+    try {
+      const res = wasBookmarked
+        ? await apiFetch(`/api/bookmarks/${item.id}`, { method: "DELETE" })
+        : await apiFetch("/api/bookmarks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ itemId: item.id }),
+          });
+      if (!res.ok) throw new Error(`Bookmark update failed (${res.status})`);
+      toast(wasBookmarked ? "Removed bookmark." : "Saved to bookmarks.");
+    } catch (err) {
+      console.error("Bookmark update failed:", err);
+      if (wasBookmarked) bookmarks.add(item.id);
+      else bookmarks.delete(item.id);
+      renderAllFeedRows();
+      toast("Couldn't update bookmark. Please try again.");
+    }
   }, "Sign in to bookmark articles.");
 }
 

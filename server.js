@@ -8,9 +8,64 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
+const admin = require("firebase-admin");
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://kairon-production-79a5.up.railway.app";
+
+// ---------------------------------------------------------------------------
+// Firestore (Firebase Admin)
+//
+// Persists what used to be in-memory-only: Telegram links/preferences and
+// the daily intelligence snapshot (feed, summary, insights, funding,
+// listings) — so a redeploy no longer wipes them, and boot doesn't have to
+// regenerate the daily data from scratch. Requires FIREBASE_SERVICE_ACCOUNT_KEY
+// (the full JSON key file content, from Firebase Console → Project Settings
+// → Service Accounts → Generate new private key). Everything below degrades
+// gracefully to in-memory-only behavior if that isn't set, same pattern as
+// Telegram/Groq/ImgBB elsewhere in this file.
+// ---------------------------------------------------------------------------
+
+let firestoreDb = null;
+try {
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+  if (serviceAccountJson) {
+    const serviceAccount = JSON.parse(serviceAccountJson);
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    firestoreDb = admin.firestore();
+    console.log("[firestore] initialized");
+  } else {
+    console.log("[firestore] FIREBASE_SERVICE_ACCOUNT_KEY not set — running in-memory only, data will not survive a redeploy");
+  }
+} catch (err) {
+  console.error("[firestore] failed to initialize:", err.message);
+}
+
+function isFirestoreConfigured() {
+  return Boolean(firestoreDb);
+}
+
+// Verifies the Firebase ID token clients send as `Authorization: Bearer
+// <token>` and attaches the verified uid to req.uid. Used by routes that
+// need to know who's calling (bookmarks) rather than trusting a client-
+// supplied userId, unlike the older Telegram-linking routes below.
+async function verifyAuth(req, res, next) {
+  if (!isFirestoreConfigured()) {
+    return res.status(503).json({ error: "Accounts aren't configured yet." });
+  }
+  const authHeader = req.get("Authorization") || "";
+  const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!idToken) {
+    return res.status(401).json({ error: "Sign in required." });
+  }
+  try {
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.uid = decoded.uid;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: "Your session has expired. Please sign in again." });
+  }
+}
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -225,6 +280,49 @@ app.get("/api/search", (req, res) => {
   });
 
   res.json({ items: results, total: results.length });
+});
+
+// ---------------------------------------------------------------------------
+// Bookmarks API
+//
+// Requires sign-in (verifyAuth) and Firestore (bookmarks are meaningless
+// without persistence — no in-memory fallback here, unlike the rest of the
+// app, since a bookmark that vanishes on redeploy isn't useful at all).
+// ---------------------------------------------------------------------------
+
+app.get("/api/bookmarks", verifyAuth, async (req, res) => {
+  try {
+    const snapshot = await firestoreDb.collection("bookmarks").where("uid", "==", req.uid).get();
+    res.json({ itemIds: snapshot.docs.map((d) => d.data().itemId) });
+  } catch (err) {
+    console.error("[bookmarks] failed to load:", err.message);
+    res.status(500).json({ error: "Failed to load bookmarks." });
+  }
+});
+
+app.post("/api/bookmarks", verifyAuth, async (req, res) => {
+  const { itemId } = req.body || {};
+  if (!itemId) return res.status(400).json({ error: "itemId is required" });
+  try {
+    await firestoreDb
+      .collection("bookmarks")
+      .doc(`${req.uid}_${itemId}`)
+      .set({ uid: req.uid, itemId, bookmarkedAt: new Date().toISOString() });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[bookmarks] failed to save:", err.message);
+    res.status(500).json({ error: "Failed to save bookmark." });
+  }
+});
+
+app.delete("/api/bookmarks/:itemId", verifyAuth, async (req, res) => {
+  try {
+    await firestoreDb.collection("bookmarks").doc(`${req.uid}_${req.params.itemId}`).delete();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[bookmarks] failed to remove:", err.message);
+    res.status(500).json({ error: "Failed to remove bookmark." });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -512,6 +610,47 @@ function buildListingRows(statusResp) {
     }));
 }
 
+// Persists the current in-memory snapshot to Firestore's feed/latest doc.
+// Called after every regeneration so the next boot can load real data
+// instead of falling back to the tiny seed or re-fetching immediately.
+async function saveIntelligenceSnapshot() {
+  if (!isFirestoreConfigured()) return;
+  try {
+    await firestoreDb.collection("feed").doc("latest").set({
+      feedItems,
+      summary: latestSummary,
+      marketSnapshot: latestMarketSnapshot,
+      fundingRounds: latestFundingRounds,
+      exchangeListings: latestExchangeListings,
+      savedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("[firestore] failed to save intelligence snapshot:", err.message);
+  }
+}
+
+// Loads the last saved snapshot on boot. Returns true if real data was
+// found and loaded, so the caller knows whether a fresh generation is
+// still needed (e.g. first-ever boot, or Firestore not configured).
+async function loadIntelligenceSnapshot() {
+  if (!isFirestoreConfigured()) return false;
+  try {
+    const doc = await firestoreDb.collection("feed").doc("latest").get();
+    if (!doc.exists) return false;
+    const data = doc.data();
+    if (Array.isArray(data.feedItems) && data.feedItems.length > 0) feedItems = data.feedItems;
+    if (data.summary) latestSummary = data.summary;
+    if (data.marketSnapshot) latestMarketSnapshot = data.marketSnapshot;
+    if (Array.isArray(data.fundingRounds)) latestFundingRounds = data.fundingRounds;
+    if (Array.isArray(data.exchangeListings)) latestExchangeListings = data.exchangeListings;
+    console.log(`[firestore] loaded cached intelligence snapshot from ${data.savedAt}`);
+    return true;
+  } catch (err) {
+    console.error("[firestore] failed to load intelligence snapshot:", err.message);
+    return false;
+  }
+}
+
 async function generateDailyIntelligence() {
   try {
     const [movers, trendingResp] = await Promise.all([fetchTopMarketMovers(), fetchTrendingSearch()]);
@@ -550,6 +689,8 @@ async function generateDailyIntelligence() {
   } catch (err) {
     console.error("[intelligence] exchange listings refresh failed, keeping previous data:", err.message);
   }
+
+  await saveIntelligenceSnapshot();
 }
 
 function msUntilNextUtcHour(hourUtc) {
@@ -669,6 +810,75 @@ const TELEGRAM_WEBHOOK_SECRET = crypto.randomBytes(24).toString("hex");
 
 function isTelegramConfigured() {
   return Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_USERNAME);
+}
+
+// Firestore persistence for telegram_links — doc ID is the chatId, since
+// that's always present and unique (unlike userId, which is a synthetic
+// `tg:<chatId>` for chats that subscribed without a Kairon account).
+async function loadTelegramLinks() {
+  if (!isFirestoreConfigured()) return;
+  try {
+    const snapshot = await firestoreDb.collection("telegram_links").get();
+    telegramLinks = snapshot.docs.map((d) => d.data());
+    console.log(`[firestore] loaded ${telegramLinks.length} telegram links`);
+  } catch (err) {
+    console.error("[firestore] failed to load telegram_links:", err.message);
+  }
+}
+
+async function saveTelegramLink(link) {
+  if (!isFirestoreConfigured()) return;
+  try {
+    await firestoreDb.collection("telegram_links").doc(String(link.chatId)).set(link);
+  } catch (err) {
+    console.error("[firestore] failed to save telegram_link:", err.message);
+  }
+}
+
+async function deleteTelegramLink(chatId) {
+  if (!isFirestoreConfigured()) return;
+  try {
+    await firestoreDb.collection("telegram_links").doc(String(chatId)).delete();
+  } catch (err) {
+    console.error("[firestore] failed to delete telegram_link:", err.message);
+  }
+}
+
+// Firestore persistence for notification_preferences — doc ID is also the
+// chatId, one doc per Telegram chat holding its selected categories.
+async function loadTelegramPreferences() {
+  if (!isFirestoreConfigured()) return;
+  try {
+    const snapshot = await firestoreDb.collection("notification_preferences").get();
+    telegramPreferences = new Map();
+    snapshot.docs.forEach((d) => {
+      telegramPreferences.set(Number(d.id), new Set(d.data().categories || []));
+    });
+    console.log(`[firestore] loaded ${telegramPreferences.size} notification preferences`);
+  } catch (err) {
+    console.error("[firestore] failed to load notification_preferences:", err.message);
+  }
+}
+
+async function saveTelegramPreferences(chatId, categoriesSet) {
+  if (!isFirestoreConfigured()) return;
+  try {
+    await firestoreDb
+      .collection("notification_preferences")
+      .doc(String(chatId))
+      .set({ categories: [...categoriesSet], updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("[firestore] failed to save notification_preferences:", err.message);
+  }
+}
+
+async function deleteTelegramPreferences(chatId) {
+  if (!isFirestoreConfigured()) return;
+  try {
+    await firestoreDb.collection("notification_preferences").doc(String(chatId)).delete();
+  } catch (err) {
+    console.error("[firestore] failed to delete notification_preferences:", err.message);
+  }
 }
 
 async function callTelegramApi(method, payload) {
@@ -853,13 +1063,15 @@ async function handleTelegramStart(message) {
   if (pending) telegramLinkTokens.delete(token);
 
   telegramLinks = telegramLinks.filter((l) => l.chatId !== chatId);
-  telegramLinks.push({
+  const link = {
     userId,
     chatId,
     telegramName: [message.from.first_name, message.from.last_name].filter(Boolean).join(" "),
     username: message.from.username || "",
     linkedAt: new Date().toISOString(),
-  });
+  };
+  telegramLinks.push(link);
+  await saveTelegramLink(link);
 
   await sendWelcomeMessage(chatId, message.from);
 }
@@ -911,6 +1123,7 @@ async function handleTelegramCallback(callbackQuery) {
     if (selected.has(category)) selected.delete(category);
     else selected.add(category);
     telegramPreferences.set(chatId, selected);
+    await saveTelegramPreferences(chatId, selected);
 
     await callTelegramApi("editMessageReplyMarkup", {
       chat_id: chatId,
@@ -922,6 +1135,7 @@ async function handleTelegramCallback(callbackQuery) {
 
   if (data === "pref_reset") {
     telegramPreferences.delete(chatId);
+    await deleteTelegramPreferences(chatId);
     await callTelegramApi("editMessageReplyMarkup", {
       chat_id: chatId,
       message_id: messageId,
@@ -945,6 +1159,7 @@ async function handleTelegramCallback(callbackQuery) {
   if (data === "unsub_confirm") {
     telegramLinks = telegramLinks.filter((l) => l.chatId !== chatId);
     telegramPreferences.delete(chatId);
+    await Promise.all([deleteTelegramLink(chatId), deleteTelegramPreferences(chatId)]);
     await callTelegramApi("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
@@ -1053,7 +1268,19 @@ app.listen(PORT, () => {
   console.log(`Kairon server running on http://localhost:${PORT}`);
 
   // Non-blocking: the server starts serving immediately with fallback feed
-  // data, then swaps in real data as soon as the first pipeline run completes.
-  ensureTelegramWebhook();
-  generateDailyIntelligence().then(scheduleDailyIntelligence);
+  // data, then swaps in real/cached data as soon as this completes. Boot
+  // loads from Firestore rather than regenerating, so a redeploy doesn't
+  // burn API calls or show a momentary reset — the 06:00 UTC schedule is
+  // the only thing that regenerates going forward.
+  (async () => {
+    ensureTelegramWebhook();
+    await Promise.all([loadTelegramLinks(), loadTelegramPreferences()]);
+
+    const hadCachedSnapshot = await loadIntelligenceSnapshot();
+    if (!hadCachedSnapshot) {
+      console.log("[intelligence] no cached snapshot found, generating now");
+      await generateDailyIntelligence();
+    }
+    scheduleDailyIntelligence();
+  })();
 });
