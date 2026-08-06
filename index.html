@@ -310,6 +310,19 @@
   }
   .analysis-text { font-size: 13.5px; color: var(--text); line-height: 1.55; }
 
+  /* Listen (text-to-speech) button — AI Market Summary + AI Coin Breakdown */
+  .listen-btn {
+    align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elevated);
+    color: var(--text-muted); font-size: 12.5px; font-weight: 600; transition: all 0.15s ease;
+  }
+  .ai-summary-card .listen-btn { margin-top: 14px; }
+  .listen-btn:hover { color: var(--text); border-color: var(--border-strong); }
+  .listen-btn svg { width: 15px; height: 15px; flex: none; }
+  .listen-btn.listening { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+  .listen-btn.listening svg { animation: listen-pulse 1s ease-in-out infinite; }
+  @keyframes listen-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
   .card-row {
     display: flex; gap: 14px; overflow-x: auto; padding: 4px 20px 10px;
     scroll-snap-type: x proximity; scrollbar-width: thin;
@@ -620,8 +633,8 @@
         </div>
         <div class="hero-stats">
           <div class="stat"><span class="stat-value" id="statSignals">--</span><span class="stat-label">Signals today</span></div>
-          <div class="stat"><span class="stat-value">06:00</span><span class="stat-label">Daily refresh (UTC)</span></div>
-          <div class="stat"><span class="stat-value">15</span><span class="stat-label">Categories</span></div>
+          <div class="stat"><span class="stat-value">Daily</span><span class="stat-label">Fresh every morning</span></div>
+          <div class="stat"><span class="stat-value">16</span><span class="stat-label">Categories</span></div>
         </div>
       </div>
     </section>
@@ -929,6 +942,7 @@ const views = document.querySelectorAll("[data-view-panel]");
 const navButtons = document.querySelectorAll("[data-nav]");
 
 function navigate(view) {
+  stopSpeaking();
   views.forEach((v) => v.classList.toggle("hidden", v.dataset.viewPanel !== view));
   navButtons.forEach((b) => {
     if (b.classList.contains("nav-link")) {
@@ -1616,6 +1630,54 @@ async function loadInsights() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Listen (text-to-speech) — reads the AI Market Summary or an AI Coin
+ * Breakdown card aloud using the browser's native Web Speech API. No
+ * API key, no dependency; degrades to a no-op if the browser lacks
+ * speechSynthesis. Only one utterance plays at a time — starting a new
+ * one, or clicking the button that's currently speaking, stops it.
+ * ------------------------------------------------------------------ */
+const speechSupported = "speechSynthesis" in window;
+let activeSpeech = null; // { btn }
+
+function listenIconHTML() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>`;
+}
+
+function stopSpeaking() {
+  if (speechSupported) window.speechSynthesis.cancel();
+  if (activeSpeech) {
+    activeSpeech.btn.classList.remove("listening");
+    activeSpeech.btn.querySelector("span").textContent = "Listen";
+  }
+  activeSpeech = null;
+}
+
+function speakText(text, btn) {
+  if (!speechSupported) return;
+  const wasThisButton = activeSpeech && activeSpeech.btn === btn;
+  stopSpeaking();
+  if (wasThisButton) return; // clicking the already-playing button just stops it
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.98;
+  const stop = () => {
+    if (activeSpeech && activeSpeech.btn === btn) stopSpeaking();
+  };
+  utterance.onend = stop;
+  utterance.onerror = stop;
+
+  activeSpeech = { btn };
+  btn.classList.add("listening");
+  btn.querySelector("span").textContent = "Stop";
+  window.speechSynthesis.speak(utterance);
+}
+
+function listenButtonHTML(extraClass) {
+  if (!speechSupported) return "";
+  return `<button type="button" class="listen-btn ${extraClass}">${listenIconHTML()}<span>Listen</span></button>`;
+}
+
+/* ------------------------------------------------------------------ *
  * AI Coin Breakdown — why today's most interesting coins moved, what
  * could happen next, and how to think about them. Real Groq analysis
  * over real data (see GET /api/analysis) — explicitly educational, not
@@ -1646,6 +1708,7 @@ function analysisCardHTML(item) {
         <span class="analysis-label">How to approach it</span>
         <p class="analysis-text">${escapeHtml(item.howToApproachIt)}</p>
       </div>` : ""}
+      ${listenButtonHTML("analysis-listen-btn")}
     </article>
   `;
 }
@@ -1660,6 +1723,15 @@ async function loadCoinAnalysis() {
       return;
     }
     el.innerHTML = data.items.map(analysisCardHTML).join("");
+    el.querySelectorAll(".analysis-card").forEach((card, i) => {
+      const item = data.items[i];
+      const btn = card.querySelector(".analysis-listen-btn");
+      if (!btn || !item) return;
+      const parts = [`${item.name}, ${item.symbol}.`, `Why it moved: ${item.whyItMoved}`];
+      if (item.whatCouldHappenNext) parts.push(`What could happen next: ${item.whatCouldHappenNext}`);
+      if (item.howToApproachIt) parts.push(`How to approach it: ${item.howToApproachIt}`);
+      btn.addEventListener("click", () => speakText(parts.join(" "), btn));
+    });
   } catch (err) {
     console.error("Failed to load coin analysis:", err);
     el.innerHTML = `<div class="row-empty grid-empty">Couldn't load today's breakdown.</div>`;
@@ -1677,7 +1749,10 @@ function renderSummary(data) {
   document.getElementById("aiSummaryCard").innerHTML = `
     <div class="ai-summary-meta"><span class="dot"></span> Generated by Kairon AI · ${updated}</div>
     <ul class="ai-summary-list">${points.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ul>
+    ${listenButtonHTML("summary-listen-btn")}
   `;
+  const btn = document.querySelector(".summary-listen-btn");
+  if (btn) btn.addEventListener("click", () => speakText(points.join(". "), btn));
 }
 
 async function loadSummary() {

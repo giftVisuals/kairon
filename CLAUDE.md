@@ -164,7 +164,7 @@ Global search by Title, Summary, Tags, Category.
 
 ## CATEGORIES
 
-Bitcoin, Ethereum, Solana, Base, DeFi, Stablecoins, Memecoins, AI, Security, Funding, Governance, Macro, Exchanges, NFTs, Airdrops.
+Bitcoin, Ethereum, Solana, Base, DeFi, Stablecoins, Memecoins, AI, Security, Funding, Governance, Macro, Exchanges, NFTs, Airdrops, Robinhood.
 
 ---
 

@@ -120,7 +120,7 @@ function toFeedRecords(items) {
 // Used only until the real data pipeline (CoinGecko + Groq, further below)
 // completes its first run, or if that pipeline fails entirely (e.g. market
 // data API unreachable). generateDailyIntelligence() overwrites this with
-// live data on startup and every day at 06:00 UTC — this is not shown in
+// live data on startup and once daily at the scheduled digest hour — this is not shown in
 // normal operation.
 const FALLBACK_FEED_SEED = [
   {
@@ -466,6 +466,43 @@ async function fetchTrendingCoins() {
   }
 }
 
+// Robinhood ($HOOD) stock tracking — 0xRiver called this "very very
+// important." It's a stock, not a coin, so it comes from Finnhub rather
+// than CoinGecko/GeckoTerminal, and is layered into the feed and coin
+// breakdown as its own independent step (never blocks the rest of the
+// pipeline if it fails). FINNHUB_API_KEY: sign up free at finnhub.io, the
+// key is on the dashboard. Not verifiable from this sandbox (finnhub.io is
+// blocked here the same way the other market APIs are) — confirm via
+// Railway logs after deploy.
+const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || "";
+
+async function fetchRobinhoodStock() {
+  if (!FINNHUB_API_KEY) throw new Error("FINNHUB_API_KEY not configured");
+  const res = await fetchWithTimeout(
+    `https://finnhub.io/api/v1/quote?symbol=HOOD&token=${FINNHUB_API_KEY}`,
+    { headers: { Accept: "application/json" } }
+  );
+  if (!res.ok) throw new Error(`Finnhub quote error: ${res.status}`);
+  const data = await res.json();
+  // Finnhub returns all-zero fields for an invalid symbol/key rather than an error status.
+  if (typeof data.c !== "number" || data.c === 0) throw new Error("Finnhub returned no quote data");
+  return data; // { c: current, d: change, dp: percent change, h, l, o, pc: prevClose }
+}
+
+function buildRobinhoodFeedItem(quote) {
+  const pct = typeof quote.dp === "number" ? quote.dp : 0;
+  const direction = pct >= 0 ? "up" : "down";
+  return {
+    title: `Robinhood (HOOD) is ${direction} ${Math.abs(pct).toFixed(1)}% today`,
+    summary: `Robinhood Markets (HOOD) is trading at ${formatUsd(quote.c)}, ${direction} ${Math.abs(pct).toFixed(1)}% from yesterday's close of ${formatUsd(
+      quote.pc
+    )}.`,
+    category: "Robinhood",
+    tags: ["HOOD", "Robinhood", "Stocks"],
+    trending: Math.abs(pct) >= 3,
+  };
+}
+
 // BTC/ETH/SOL always appear in the feed and Insights regardless of whether
 // they're among the biggest movers — they're the reference points every
 // trader checks first, and a pure "sorted by % change" list tends to bury
@@ -809,6 +846,15 @@ async function generateDailyIntelligence() {
     const built = buildFeedItemsFromMarketData(movers, trending);
     if (built.length === 0) throw new Error("No feed items generated from market data");
 
+    let robinhoodQuote = null;
+    try {
+      robinhoodQuote = await fetchRobinhoodStock();
+      built.push(buildRobinhoodFeedItem(robinhoodQuote));
+      console.log("[intelligence] added Robinhood (HOOD) stock update");
+    } catch (err) {
+      console.error("[intelligence] Robinhood stock fetch failed, skipping:", err.message);
+    }
+
     feedItems = toFeedRecords(built);
     latestMarketSnapshot = buildMarketSnapshot(movers, trending);
 
@@ -823,7 +869,28 @@ async function generateDailyIntelligence() {
 
     try {
       const topCoins = selectTopInterestingCoins(movers, trending);
-      latestCoinAnalyses = await generateCoinAnalyses(topCoins);
+      let analyses = await generateCoinAnalyses(topCoins);
+
+      if (robinhoodQuote) {
+        try {
+          const robinhoodCoin = {
+            id: "robinhood-hood",
+            name: "Robinhood",
+            symbol: "HOOD",
+            change24h: Number((robinhoodQuote.dp || 0).toFixed(2)),
+            category: "Robinhood",
+            marketCapRank: null,
+            trendingSource: null,
+          };
+          const [robinhoodAnalysis] = await generateCoinAnalyses([robinhoodCoin]);
+          // Prepended, not appended — 0xRiver flagged Robinhood as "very very important."
+          if (robinhoodAnalysis) analyses = [robinhoodAnalysis, ...analyses];
+        } catch (err) {
+          console.error("[intelligence] Robinhood coin analysis failed:", err.message);
+        }
+      }
+
+      latestCoinAnalyses = analyses;
       console.log(`[intelligence] generated ${latestCoinAnalyses.length} coin analyses`);
     } catch (err) {
       console.error("[intelligence] coin analysis generation failed, keeping previous data:", err.message);
@@ -838,30 +905,106 @@ async function generateDailyIntelligence() {
   await saveIntelligenceSnapshot();
 }
 
-function msUntilNextUtcHour(hourUtc) {
+// Digest timing — 0xRiver (and presumably most subscribers) is US-based, so
+// the daily send is anchored to a local wall-clock hour in a real timezone
+// rather than a fixed UTC hour, and stays correct across DST transitions.
+// Configurable in case a future subscriber base skews to a different region.
+const DIGEST_TIMEZONE = process.env.DIGEST_TIMEZONE || "America/New_York";
+const DIGEST_HOUR_LOCAL = Number(process.env.DIGEST_HOUR_LOCAL || 7);
+
+// Converts a local wall-clock date/time in `timeZone` to the UTC instant it
+// represents. There's no Date constructor for "this time, in that zone," so
+// this iterates: guess a UTC instant, check what that instant reads as in
+// the target zone, and correct the guess by the difference. Two passes is
+// enough in practice and correctly lands on either side of a DST transition
+// because the offset is re-derived from the corrected guess each time.
+function zonedTimeToUtcMs(year, month, day, hour, minute, second, timeZone) {
+  const desired = Date.UTC(year, month - 1, day, hour, minute, second);
+  let guess = desired;
+  for (let i = 0; i < 2; i++) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).formatToParts(new Date(guess));
+    const map = {};
+    for (const p of parts) map[p.type] = p.value;
+    const readAsUtc = Date.UTC(
+      Number(map.year),
+      Number(map.month) - 1,
+      Number(map.day),
+      map.hour === "24" ? 0 : Number(map.hour),
+      Number(map.minute),
+      Number(map.second)
+    );
+    guess += desired - readAsUtc;
+  }
+  return guess;
+}
+
+function localDatePartsInZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  return { year: Number(map.year), month: Number(map.month), day: Number(map.day) };
+}
+
+// Ms until the next occurrence of `hourLocal` (0-23) local time in
+// `timeZone`. DST-aware — re-derives the zone's offset for the actual
+// candidate date rather than assuming today's offset still applies tomorrow.
+function msUntilNextLocalHour(timeZone, hourLocal) {
   const now = new Date();
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hourUtc, 0, 0, 0));
-  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
-  return next.getTime() - now.getTime();
+  const today = localDatePartsInZone(now, timeZone);
+  let target = zonedTimeToUtcMs(today.year, today.month, today.day, hourLocal, 0, 0, timeZone);
+
+  if (target <= now.getTime()) {
+    const tomorrow = localDatePartsInZone(new Date(target + 24 * 60 * 60 * 1000), timeZone);
+    target = zonedTimeToUtcMs(tomorrow.year, tomorrow.month, tomorrow.day, hourLocal, 0, 0, timeZone);
+  }
+
+  return target - now.getTime();
+}
+
+// A friendly label for the current send time, e.g. "7:00 AM EDT" — computed
+// fresh (not hardcoded) so it reflects DST correctly whenever it's read.
+function digestScheduleLabel() {
+  const hour12 = ((DIGEST_HOUR_LOCAL + 11) % 12) + 1;
+  const ampm = DIGEST_HOUR_LOCAL < 12 ? "AM" : "PM";
+  const zonePart = new Intl.DateTimeFormat("en-US", { timeZone: DIGEST_TIMEZONE, timeZoneName: "short" })
+    .formatToParts(new Date())
+    .find((p) => p.type === "timeZoneName");
+  return `${hour12}:00 ${ampm}${zonePart ? ` ${zonePart.value}` : ""}`;
 }
 
 // Data refresh and Telegram notification are deliberately separate calls.
 // generateDailyIntelligence() runs on every boot (so the site never shows
 // stale/empty data after a deploy) and would otherwise re-send the digest
 // on every redeploy — this ties the actual user-facing send to only the
-// scheduled 06:00 UTC tick (plus the once-per-day guard inside
-// sendDailyDigest() itself as a second line of defense).
+// scheduled tick (plus the once-per-day guard inside sendDailyDigest()
+// itself as a second line of defense).
 async function runScheduledDailyTick() {
   await generateDailyIntelligence();
   await sendDailyDigest();
 }
 
 function scheduleDailyIntelligence() {
-  const delay = msUntilNextUtcHour(6);
-  console.log(`[intelligence] next scheduled refresh in ${Math.round(delay / 60000)} minutes`);
-  setTimeout(() => {
-    runScheduledDailyTick();
-    setInterval(runScheduledDailyTick, 24 * 60 * 60 * 1000);
+  const delay = msUntilNextLocalHour(DIGEST_TIMEZONE, DIGEST_HOUR_LOCAL);
+  console.log(`[intelligence] next scheduled refresh in ${Math.round(delay / 60000)} minutes (${digestScheduleLabel()}, ${DIGEST_TIMEZONE})`);
+  setTimeout(async () => {
+    await runScheduledDailyTick();
+    // Reschedule from scratch rather than setInterval(24h) — a fixed 24h
+    // interval would drift off the target local hour on DST transition days.
+    scheduleDailyIntelligence();
   }, delay);
 }
 
@@ -1084,10 +1227,10 @@ async function ensureTelegramWebhook() {
 }
 
 // Per-chat category preferences for the daily digest. Empty/missing set
-// means "no filter — send everything." Same 15 categories as the site.
+// means "no filter — send everything." Same 16 categories as the site.
 const ALL_CATEGORIES = [
   "Bitcoin", "Ethereum", "Solana", "Base", "DeFi", "Stablecoins", "Memecoins", "AI",
-  "Security", "Funding", "Governance", "Macro", "Exchanges", "NFTs", "Airdrops",
+  "Security", "Funding", "Governance", "Macro", "Exchanges", "NFTs", "Airdrops", "Robinhood",
 ];
 let telegramPreferences = new Map(); // chatId -> Set<category>
 
@@ -1111,7 +1254,7 @@ function welcomeText(firstName) {
   return [
     `Welcome to Kairon${greeting}! 👋`,
     "",
-    "I'm your daily on-chain intelligence briefing. Every morning at 06:00 UTC I'll send you one focused message covering the strongest, most interesting crypto signals — big market movers, trending coins, and an AI-written summary of what actually matters. One briefing a day, never more.",
+    `I'm your daily on-chain intelligence briefing. Every morning around ${digestScheduleLabel()} I'll send you one focused message covering the strongest, most interesting crypto signals — big market movers, trending coins, and an AI-written summary of what actually matters. One briefing a day, never more.`,
     "",
     "Here's what you can do:",
     "📋 /preferences — choose which categories you want in your briefing",
@@ -1135,7 +1278,7 @@ async function sendWelcomeMessage(chatId, from) {
 
 // Sends one consolidated daily digest (today's summary + top signals) to
 // everyone who has messaged the bot, respecting each chat's category
-// preferences. Only ever called from the scheduled 06:00 UTC tick — never
+// preferences. Only ever called from the scheduled daily tick — never
 // from a data refresh — plus this date guard as a second safeguard against
 // double-sends (e.g. if the interval and a redeploy's boot run were to
 // somehow overlap). Note: this guard lives in memory, so it does not
@@ -1154,8 +1297,15 @@ async function sendDailyDigest() {
 
   for (const link of telegramLinks) {
     const prefs = telegramPreferences.get(link.chatId);
-    const relevant = prefs && prefs.size > 0 ? feedItems.filter((i) => prefs.has(i.category)) : feedItems;
-    if (relevant.length === 0) continue; // nothing matches their filter today — skip rather than send an empty digest
+    let relevant = prefs && prefs.size > 0 ? feedItems.filter((i) => prefs.has(i.category)) : feedItems;
+    let usedFallback = false;
+    if (relevant.length === 0) {
+      // Nothing matched their categories today — send the day's top movers
+      // anyway rather than silently skipping them for the day.
+      relevant = feedItems;
+      usedFallback = true;
+    }
+    if (relevant.length === 0) continue; // pipeline itself produced nothing — truly nothing to send
 
     const spotlight = latestCoinAnalyses[0];
     const lines = [
@@ -1163,7 +1313,7 @@ async function sendDailyDigest() {
       "",
       ...latestSummary.points.map((p) => `• ${p}`),
       "",
-      "*Top signals today:*",
+      usedFallback ? "*Nothing matched your categories today — here's what's moving instead:*" : "*Top signals today:*",
       ...relevant.slice(0, 3).map((i) => `— ${i.title}`),
       ...(spotlight
         ? ["", `*Spotlight: ${spotlight.name} (${spotlight.symbol})*`, spotlight.whyItMoved]
@@ -1403,7 +1553,7 @@ app.get("/api/telegram/status", (req, res) => {
 });
 
 // Manually forces a refresh of the daily intelligence pipeline — useful for
-// testing without waiting for the 06:00 UTC schedule. Disabled unless
+// testing without waiting for the daily schedule. Disabled unless
 // ADMIN_SECRET is set in the environment. Does NOT send the Telegram digest
 // unless ?notify=true is also passed — and even then, sendDailyDigest()'s
 // own once-per-day guard still applies, so this can't be used to spam
@@ -1451,7 +1601,7 @@ app.listen(PORT, () => {
   // Non-blocking: the server starts serving immediately with fallback feed
   // data, then swaps in real/cached data as soon as this completes. Boot
   // loads from Firestore rather than regenerating, so a redeploy doesn't
-  // burn API calls or show a momentary reset — the 06:00 UTC schedule is
+  // burn API calls or show a momentary reset — the daily schedule is
   // the only thing that regenerates going forward.
   (async () => {
     ensureTelegramWebhook();
