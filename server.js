@@ -724,6 +724,13 @@ function buildFallbackSummary(movers, trending) {
 // (it's only ever overwritten on a successful generation), which is exactly
 // the "being generated, check back shortly" empty state that's the single
 // biggest thing wrong with showing this site to a paying customer.
+// Coin breakdown slugs only need to be unique within the current day's
+// list (it's fully replaced daily, same as feed slugs) — includes the
+// symbol so two similarly-named tokens don't collide.
+function coinAnalysisSlug(name, symbol) {
+  return slugify(`${name}-${symbol}-coin-breakdown`);
+}
+
 function buildFallbackCoinAnalyses(coins) {
   return coins.map((c) => {
     const changeKnown = typeof c.change24h === "number";
@@ -736,6 +743,7 @@ function buildFallbackCoinAnalyses(coins) {
       : "";
     return {
       id: c.id,
+      slug: coinAnalysisSlug(c.name, c.symbol),
       name: c.name,
       symbol: c.symbol,
       change24h: c.change24h,
@@ -859,6 +867,7 @@ async function generateCoinAnalyses(coins) {
       if (!a || !a.whyItMoved) return null;
       return {
         id: c.id,
+        slug: coinAnalysisSlug(c.name, c.symbol),
         name: c.name,
         symbol: c.symbol,
         change24h: c.change24h,
@@ -879,6 +888,18 @@ let latestCoinAnalyses = [];
 
 app.get("/api/analysis", (req, res) => {
   res.json({ items: latestCoinAnalyses });
+});
+
+// Lets an individual AI Coin Breakdown card be shared as its own link
+// (e.g. /coin/pepe-pepe-coin-breakdown) instead of only living inside the
+// homepage grid. Same-day only, like feed slugs — latestCoinAnalyses is
+// fully replaced daily.
+app.get("/api/analysis/:slug", (req, res) => {
+  const item = latestCoinAnalyses.find((a) => a.slug === req.params.slug);
+  if (!item) {
+    return res.status(404).json({ error: "This coin breakdown isn't available anymore — it may be from a previous day." });
+  }
+  res.json(item);
 });
 
 let latestSummary = { points: ["Today's briefing is being generated — check back shortly."], generatedAt: null };

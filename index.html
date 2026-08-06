@@ -299,8 +299,10 @@
   }
   .analysis-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
-    padding: 18px; display: flex; flex-direction: column; gap: 14px;
+    padding: 18px; display: flex; flex-direction: column; gap: 14px; cursor: pointer;
   }
+  .analysis-card:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+  .analysis-card-actions { display: flex; gap: 8px; }
   .analysis-card-top { display: flex; align-items: center; justify-content: space-between; }
   .analysis-coin-name { font-size: 15.5px; font-weight: 700; }
   .analysis-coin-symbol { color: var(--text-faint); font-weight: 500; margin-left: 4px; font-size: 13px; }
@@ -869,6 +871,15 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
     <div id="articleModalContent"></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="coinModalOverlay">
+  <div class="modal article-modal" role="dialog" aria-modal="true" aria-labelledby="coinModalTitle">
+    <button class="icon-btn modal-close" id="coinModalClose" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <div id="coinModalContent"></div>
   </div>
 </div>
 
@@ -1480,6 +1491,51 @@ async function checkDeepLinkedArticle() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Shareable AI Coin Breakdown — each card is deep-linkable at
+ * /coin/:slug, same pattern as /feed/:slug for articles.
+ * ------------------------------------------------------------------ */
+const coinModalOverlay = document.getElementById("coinModalOverlay");
+const coinModalClose = document.getElementById("coinModalClose");
+const coinModalContent = document.getElementById("coinModalContent");
+
+function openCoinDetail(item) {
+  stopSpeaking();
+  coinModalContent.innerHTML = analysisCardHTML(item);
+  // skipOpen: already inside the detail view, no need for the card itself
+  // to open another one when clicked.
+  bindAnalysisCard(coinModalContent.querySelector(".analysis-card"), item, { skipOpen: true });
+  coinModalOverlay.classList.remove("hidden");
+
+  if (window.location.pathname !== `/coin/${item.slug}`) {
+    history.pushState({ coinSlug: item.slug }, "", `/coin/${item.slug}`);
+  }
+}
+
+function closeCoinModal() {
+  stopSpeaking();
+  coinModalOverlay.classList.add("hidden");
+  if (window.location.pathname.startsWith("/coin/")) {
+    history.pushState({}, "", "/");
+  }
+}
+coinModalClose.addEventListener("click", closeCoinModal);
+coinModalOverlay.addEventListener("click", (e) => { if (e.target === coinModalOverlay) closeCoinModal(); });
+
+async function checkDeepLinkedCoin() {
+  const match = window.location.pathname.match(/^\/coin\/([^/]+)\/?$/);
+  if (!match) return;
+  try {
+    const res = await fetch(`/api/analysis/${match[1]}`);
+    if (!res.ok) return;
+    const item = await res.json();
+    window.location.hash = "/home";
+    openCoinDetail(item);
+  } catch (err) {
+    console.error("Failed to load shared coin breakdown:", err);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Feed rendering
  * ------------------------------------------------------------------ */
 function escapeHtml(str) {
@@ -1738,7 +1794,7 @@ function analysisCardHTML(item) {
   const changeClass = changeKnown ? (item.change24h >= 0 ? "action-buy" : "action-sell") : "";
   const changeText = changeKnown ? `${item.change24h >= 0 ? "+" : ""}${item.change24h.toFixed(1)}%` : "";
   return `
-    <article class="analysis-card">
+    <article class="analysis-card" data-slug="${escapeHtml(item.slug || "")}">
       <div class="analysis-card-top">
         <span><span class="analysis-coin-name">${escapeHtml(item.name)}</span><span class="analysis-coin-symbol">${escapeHtml(item.symbol)}</span></span>
         <span class="insight-change ${changeClass}">${changeText}</span>
@@ -1765,9 +1821,46 @@ function analysisCardHTML(item) {
         <span class="analysis-label">How to approach it</span>
         <p class="analysis-text">${escapeHtml(item.howToApproachIt)}</p>
       </div>` : ""}
-      ${listenButtonHTML("analysis-listen-btn")}
+      <div class="analysis-card-actions">
+        ${listenButtonHTML("analysis-listen-btn")}
+        <button type="button" class="listen-btn share-analysis-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+          <span>Share</span>
+        </button>
+      </div>
     </article>
   `;
+}
+
+function speechPartsForAnalysis(item) {
+  const parts = [`${item.name}, ${item.symbol}.`];
+  if (item.onChainActivity) parts.push(`On-chain in the last hour: ${item.onChainActivity.transactionCount} transactions, ${item.onChainActivity.swapCount} swaps.`);
+  parts.push(`Why it moved: ${item.whyItMoved}`);
+  if (item.whatCouldHappenNext) parts.push(`What could happen next: ${item.whatCouldHappenNext}`);
+  if (item.howToApproachIt) parts.push(`How to approach it: ${item.howToApproachIt}`);
+  return parts.join(" ");
+}
+
+function shareCoinBreakdown(item) {
+  const url = `${window.location.origin}/coin/${item.slug}`;
+  if (navigator.share) {
+    navigator.share({ title: `${item.name} (${item.symbol}) — Kairon AI Coin Breakdown`, text: item.whyItMoved, url }).catch(() => {});
+  } else {
+    navigator.clipboard.writeText(url).then(() => toast("Link copied to clipboard."));
+  }
+}
+
+function bindAnalysisCard(card, item, opts = {}) {
+  const listenBtn = card.querySelector(".analysis-listen-btn");
+  if (listenBtn) listenBtn.addEventListener("click", (e) => { e.stopPropagation(); speakText(speechPartsForAnalysis(item), listenBtn); });
+  const shareBtn = card.querySelector(".share-analysis-btn");
+  if (shareBtn) shareBtn.addEventListener("click", (e) => { e.stopPropagation(); shareCoinBreakdown(item); });
+  if (item.slug && !opts.skipOpen) {
+    card.style.cursor = "pointer";
+    card.addEventListener("click", () => openCoinDetail(item));
+  } else {
+    card.style.cursor = "default";
+  }
 }
 
 async function loadCoinAnalysis() {
@@ -1780,17 +1873,7 @@ async function loadCoinAnalysis() {
       return;
     }
     el.innerHTML = data.items.map(analysisCardHTML).join("");
-    el.querySelectorAll(".analysis-card").forEach((card, i) => {
-      const item = data.items[i];
-      const btn = card.querySelector(".analysis-listen-btn");
-      if (!btn || !item) return;
-      const parts = [`${item.name}, ${item.symbol}.`];
-      if (item.onChainActivity) parts.push(`On-chain in the last hour: ${item.onChainActivity.transactionCount} transactions, ${item.onChainActivity.swapCount} swaps.`);
-      parts.push(`Why it moved: ${item.whyItMoved}`);
-      if (item.whatCouldHappenNext) parts.push(`What could happen next: ${item.whatCouldHappenNext}`);
-      if (item.howToApproachIt) parts.push(`How to approach it: ${item.howToApproachIt}`);
-      btn.addEventListener("click", () => speakText(parts.join(" "), btn));
-    });
+    el.querySelectorAll(".analysis-card").forEach((card, i) => bindAnalysisCard(card, data.items[i]));
   } catch (err) {
     console.error("Failed to load coin analysis:", err);
     el.innerHTML = `<div class="row-empty grid-empty">Couldn't load today's breakdown.</div>`;
@@ -2067,6 +2150,7 @@ settingsThemeToggle.addEventListener("click", () => {
 // already initialized.
 routeFromHash();
 checkDeepLinkedArticle();
+checkDeepLinkedCoin();
 </script>
 </body>
 </html>
