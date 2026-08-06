@@ -57,35 +57,17 @@ Firebase config lives in a single dedicated file (`public/js/firebase.js`). Neve
 ```
 /
 │
-├── index.html
-├── server.js
-├── package.json
-├── CLAUDE.md
-├── README.md
-├── .gitignore
-│
-├── public/
-│   ├── css/
-│   │     styles.css
-│   │
-│   ├── js/
-│   │     app.js
-│   │     firebase.js
-│   │     auth.js
-│   │
-│   ├── images/
-│   │     logo.png
-│   │
-│   └── icons/
-│
-├── routes/
-│
-├── utils/
-│
-└── services/
+├── index.html      → Entire frontend (HTML + CSS + JavaScript in one file)
+├── server.js       → Express server, API routes, feed handling,
+│                      Telegram bot integration, notifications,
+│                      future AI/news collection
+├── firebase.js     → Firebase initialization, Authentication, Firestore exports
+├── package.json    → Dependencies and scripts
+├── CLAUDE.md       → Project rules, coding standards, GitHub workflow
+└── .gitignore
 ```
 
-Additional folders may be created whenever necessary. Do NOT put everything inside `server.js`.
+This flat structure replaces the earlier nested `public/`, `routes/`, `utils/`, `services/` plan. Keep the project to these files unless a new file is clearly necessary — confirm before introducing new top-level structure (e.g. a `routes/` folder) rather than assuming it's wanted.
 
 ---
 
