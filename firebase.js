@@ -7,6 +7,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import {
   getAuth,
   GoogleAuthProvider,
+  OAuthProvider,
   signInWithPopup,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -32,9 +33,19 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const googleProvider = new GoogleAuthProvider();
+const appleProvider = new OAuthProvider("apple.com");
 
 function signInWithGoogle() {
   return signInWithPopup(auth, googleProvider);
+}
+
+function signInWithApple() {
+  return signInWithPopup(auth, appleProvider);
+}
+
+function updateUserProfile(updates) {
+  if (!auth.currentUser) return Promise.reject(new Error("Not signed in"));
+  return updateProfile(auth.currentUser, updates);
 }
 
 function signUpWithEmail(email, password, displayName) {
@@ -63,9 +74,11 @@ export {
   auth,
   db,
   signInWithGoogle,
+  signInWithApple,
   signUpWithEmail,
   signInWithEmail,
   resetPassword,
   logout,
   onAuthStateChanged,
+  updateUserProfile,
 };

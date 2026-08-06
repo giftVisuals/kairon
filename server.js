@@ -25,8 +25,12 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
   }
 }
 
+const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
+
 const app = express();
-app.use(express.json());
+// Bumped from Express's 100kb default to fit base64-encoded profile photos
+// (the client downsizes images before upload, but base64 still inflates size ~33%).
+app.use(express.json({ limit: "6mb" }));
 
 // ---------------------------------------------------------------------------
 // In-memory data store (placeholder)
@@ -396,9 +400,53 @@ function buildFallbackSummary(movers, trendingResp) {
 
 let latestSummary = { points: ["Today's briefing is being generated — check back shortly."], generatedAt: null };
 
+// Raw market data behind the feed/summary, kept around so the Insights and
+// Alerts pages can show it directly instead of needing their own data source.
+let latestMarketSnapshot = { topGainers: [], topLosers: [], trending: [], updatedAt: null };
+
 app.get("/api/summary", (req, res) => {
   res.json(latestSummary);
 });
+
+app.get("/api/insights", (req, res) => {
+  res.json(latestMarketSnapshot);
+});
+
+// "Alerts" are the subset of today's feed that's notable enough to flag —
+// currently: items tagged trending by the daily pipeline (big movers or
+// currently trending on CoinGecko). No separate alerts data source exists
+// yet, so this reuses the same real feed data rather than fabricate one.
+app.get("/api/alerts", (req, res) => {
+  const items = feedItems.filter((item) => item.trending);
+  res.json({ items, total: items.length, updatedAt: latestSummary.generatedAt });
+});
+
+function buildMarketSnapshot(movers, trendingResp) {
+  const valid = movers.filter((m) => typeof m.price_change_percentage_24h === "number");
+  const toRow = (m) => ({
+    id: m.id,
+    name: m.name,
+    symbol: m.symbol.toUpperCase(),
+    price: m.current_price,
+    change24h: Number(m.price_change_percentage_24h.toFixed(2)),
+    marketCapRank: m.market_cap_rank,
+  });
+
+  const topGainers = [...valid].sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h).slice(0, 10).map(toRow);
+  const topLosers = [...valid].sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h).slice(0, 10).map(toRow);
+  const trending = ((trendingResp && trendingResp.coins) || []).slice(0, 10).map((c) => ({
+    id: c.item.id,
+    name: c.item.name,
+    symbol: (c.item.symbol || "").toUpperCase(),
+    marketCapRank: c.item.market_cap_rank || null,
+    change24h:
+      c.item.data && c.item.data.price_change_percentage_24h && typeof c.item.data.price_change_percentage_24h.usd === "number"
+        ? Number(c.item.data.price_change_percentage_24h.usd.toFixed(2))
+        : null,
+  }));
+
+  return { topGainers, topLosers, trending, updatedAt: new Date().toISOString() };
+}
 
 async function generateDailyIntelligence() {
   try {
@@ -407,6 +455,7 @@ async function generateDailyIntelligence() {
     if (built.length === 0) throw new Error("No feed items generated from market data");
 
     feedItems = toFeedRecords(built);
+    latestMarketSnapshot = buildMarketSnapshot(movers, trendingResp);
 
     let points;
     try {
@@ -439,6 +488,55 @@ function scheduleDailyIntelligence() {
     setInterval(generateDailyIntelligence, 24 * 60 * 60 * 1000);
   }, delay);
 }
+
+// ---------------------------------------------------------------------------
+// Avatar upload (ImgBB proxy)
+//
+// The client downsizes the image and sends it as a base64 data URL. The
+// upload is proxied through the server so IMGBB_API_KEY never reaches the
+// browser. The resulting hosted URL is handed back to the client, which
+// then calls Firebase Auth's updateProfile({ photoURL }) itself — no
+// Firestore involved, profile photos live on the Firebase Auth user record.
+// ---------------------------------------------------------------------------
+
+app.post("/api/upload/avatar", async (req, res) => {
+  if (!IMGBB_API_KEY) {
+    return res.status(503).json({ error: "Image uploads aren't configured yet." });
+  }
+
+  const { imageBase64 } = req.body || {};
+  if (!imageBase64 || typeof imageBase64 !== "string") {
+    return res.status(400).json({ error: "imageBase64 is required" });
+  }
+
+  const base64Data = imageBase64.includes(",") ? imageBase64.split(",")[1] : imageBase64;
+  // Rough size guard: base64 is ~33% larger than the original binary.
+  if (base64Data.length > 5_000_000) {
+    return res.status(413).json({ error: "Image is too large." });
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set("key", IMGBB_API_KEY);
+    params.set("image", base64Data);
+
+    const uploadRes = await fetchWithTimeout(
+      "https://api.imgbb.com/1/upload",
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params.toString() },
+      15000
+    );
+    const data = await uploadRes.json();
+
+    if (!uploadRes.ok || !data.success) {
+      throw new Error((data.error && data.error.message) || `ImgBB error: ${uploadRes.status}`);
+    }
+
+    res.json({ url: data.data.url });
+  } catch (err) {
+    console.error("[avatar] upload failed:", err.message);
+    res.status(502).json({ error: "Image upload failed. Please try again." });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Settings API (placeholder)

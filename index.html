@@ -220,8 +220,9 @@
   .avatar {
     width: 28px; height: 28px; border-radius: 999px; background: var(--accent);
     color: #fff; display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700; flex: none;
+    font-size: 12px; font-weight: 700; flex: none; overflow: hidden;
   }
+  .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .user-chip-name { font-size: 13.5px; font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .user-dropdown {
@@ -369,6 +370,78 @@
   }
   .placeholder-view h2 { font-size: 22px; font-weight: 800; }
   .placeholder-view p { color: var(--text-muted); max-width: 400px; font-size: 14.5px; line-height: 1.6; }
+
+  /* Page header (Feed / Insights / Alerts / Settings) */
+  .page-header { max-width: var(--container); margin: 0 auto; padding: 36px 20px 8px; }
+  .page-header h1 { font-size: clamp(24px, 4vw, 32px); font-weight: 800; letter-spacing: -0.01em; }
+  .page-header p { margin-top: 8px; color: var(--text-muted); font-size: 14.5px; }
+
+  /* Filter chips */
+  .filter-chips {
+    display: flex; gap: 8px; overflow-x: auto; max-width: var(--container); margin: 0 auto;
+    padding: 12px 20px 20px; scrollbar-width: thin;
+  }
+  .chip {
+    flex: none; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface);
+    color: var(--text-muted); font-size: 13px; font-weight: 600;
+  }
+  .chip:hover { background: var(--surface-hover); color: var(--text); }
+  .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* Feed / Alerts grid (full listing, not a horizontal row) */
+  .feed-grid {
+    max-width: var(--container); margin: 0 auto; padding: 4px 20px 50px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px;
+  }
+  .feed-grid .card { width: 100%; }
+  .grid-empty { grid-column: 1 / -1; }
+
+  /* Insights */
+  .insights-grid {
+    max-width: var(--container); margin: 0 auto; padding: 16px 20px 50px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px;
+  }
+  .insights-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 18px; }
+  .insights-panel h3 { font-size: 14.5px; font-weight: 700; margin-bottom: 12px; }
+  .insight-row {
+    display: flex; align-items: center; justify-content: space-between; padding: 9px 0;
+    border-bottom: 1px solid var(--border); font-size: 13.5px;
+  }
+  .insight-row:last-child { border-bottom: none; }
+  .insight-name { font-weight: 600; }
+  .insight-symbol { color: var(--text-faint); font-weight: 500; margin-left: 4px; }
+  .insight-change { font-weight: 700; }
+  .insight-empty { color: var(--text-faint); font-size: 13px; padding: 12px 0; }
+
+  /* Settings */
+  .settings-wrap { max-width: 640px; margin: 0 auto; padding: 0 20px 60px; }
+  .settings-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+    padding: 20px; margin-top: 18px;
+  }
+  .settings-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 16px; }
+  .profile-row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .avatar-upload { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .avatar-lg {
+    width: 76px; height: 76px; border-radius: 999px; font-size: 24px; overflow: hidden;
+    background-size: cover; background-position: center;
+  }
+  .avatar-lg img { width: 100%; height: 100%; object-fit: cover; }
+  .profile-fields { flex: 1; min-width: 220px; }
+  .theme-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .settings-muted { color: var(--text-muted); font-size: 13.5px; }
+  .telegram-status-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  .telegram-linked-badge { color: var(--positive); font-weight: 700; font-size: 13.5px; }
+  .telegram-detail { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+
+  /* Article modal */
+  .article-modal { max-width: 480px; }
+  .article-modal .badge { margin-bottom: 12px; }
+  .article-modal h2 { font-size: 20px; line-height: 1.4; margin-bottom: 12px; }
+  .article-modal .card-summary { -webkit-line-clamp: unset; font-size: 14.5px; color: var(--text-muted); line-height: 1.6; }
+  .article-modal .card-bottom { margin-top: 18px; }
 
   /* Footer */
   .site-footer { border-top: 1px solid var(--border); margin-top: 40px; padding: 36px 0 28px; }
@@ -552,42 +625,91 @@
   </section>
 
   <section class="view hidden" id="view-feed" data-view-panel="feed">
-    <div class="placeholder-view">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-      </div>
-      <h2>The full Feed is on its way</h2>
-      <p>A dedicated page for every category, tag, and article — with slugs, sharing, and bookmarking — is next on the roadmap.</p>
+    <div class="page-header">
+      <h1>Feed</h1>
+      <p>Every signal Kairon caught today, filterable by category.</p>
     </div>
+    <div class="filter-chips" id="feedCategoryChips"></div>
+    <div class="feed-grid" id="feedGrid"></div>
   </section>
 
   <section class="view hidden" id="view-insights" data-view-panel="insights">
-    <div class="placeholder-view">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V9M12 19V5M20 19v-7"/></svg>
+    <div class="page-header">
+      <h1>Insights</h1>
+      <p>Today's biggest movers, straight from live market data.</p>
+    </div>
+    <div class="insights-grid">
+      <div class="insights-panel">
+        <h3>Top Gainers</h3>
+        <div id="insightsGainers" class="insights-table"></div>
       </div>
-      <h2>Insights is coming soon</h2>
-      <p>Deeper dives into smart money activity, listings, and funding will live here.</p>
+      <div class="insights-panel">
+        <h3>Top Losers</h3>
+        <div id="insightsLosers" class="insights-table"></div>
+      </div>
+      <div class="insights-panel">
+        <h3>Trending on CoinGecko</h3>
+        <div id="insightsTrending" class="insights-table"></div>
+      </div>
     </div>
   </section>
 
   <section class="view hidden" id="view-alerts" data-view-panel="alerts">
-    <div class="placeholder-view">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
-      </div>
-      <h2>Alerts is coming soon</h2>
-      <p>Alerts will be public and readable by anyone — no sign-in required. Personalized alerts arrive later.</p>
+    <div class="page-header">
+      <h1>Alerts</h1>
+      <p>Public, no sign-in required — today's most significant moves and trending signals.</p>
     </div>
+    <div class="feed-grid" id="alertsGrid"></div>
   </section>
 
   <section class="view hidden" id="view-settings" data-view-panel="settings">
-    <div class="placeholder-view">
+    <div class="placeholder-view hidden" id="settingsGuest">
       <div class="placeholder-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1z"/></svg>
       </div>
-      <h2 id="settingsHeading">Settings is coming soon</h2>
-      <p id="settingsBody">Profile, Telegram linking, notification preferences, and theme controls will live here.</p>
+      <h2>Sign in to view Settings</h2>
+      <p>Settings — including your profile, Telegram link, and theme — are only available to signed-in users.</p>
+      <button class="btn btn-primary" id="settingsSignInBtn" style="margin-top: 8px">Sign In</button>
+    </div>
+
+    <div class="settings-wrap hidden" id="settingsLoggedIn">
+      <div class="page-header"><h1>Settings</h1></div>
+
+      <div class="settings-card">
+        <h3>Profile</h3>
+        <div class="profile-row">
+          <div class="avatar-upload">
+            <div class="avatar avatar-lg" id="settingsAvatarPreview"></div>
+            <input type="file" id="avatarFileInput" accept="image/*" class="hidden" />
+            <button class="btn btn-ghost" id="changePhotoBtn" type="button">Change photo</button>
+          </div>
+          <div class="profile-fields">
+            <label class="field">
+              <span>Display name</span>
+              <input type="text" id="displayNameInput" />
+            </label>
+            <label class="field">
+              <span>Email</span>
+              <input type="text" id="emailInput" disabled />
+            </label>
+            <button class="btn btn-primary" id="saveProfileBtn" type="button">Save changes</button>
+            <p class="form-error hidden" id="profileError"></p>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Telegram</h3>
+        <div id="telegramStatus"></div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Theme</h3>
+        <div class="theme-row">
+          <span class="settings-muted">Switch between light and dark mode.</span>
+          <button class="btn btn-ghost" id="settingsThemeToggle" type="button">Toggle theme</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -624,6 +746,11 @@
       Continue with Google
     </button>
 
+    <button class="btn btn-google" id="appleSignInBtn" style="margin-top: 10px">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M16.365 1.43c0 1.14-.415 2.192-1.24 3.06-.995 1.05-2.19 1.658-3.487 1.555-.148-1.09.372-2.24 1.148-2.958.83-.77 2.26-1.42 3.579-1.657zM20.42 17.24c-.522 1.212-.772 1.754-1.443 2.83-.937 1.5-2.257 3.37-3.895 3.385-1.458.014-1.833-.947-3.807-.937-1.973.01-2.384.955-3.843.94-1.637-.014-2.887-1.702-3.824-3.2-2.622-4.196-2.897-9.12-1.28-11.74 1.148-1.86 2.965-2.947 4.673-2.947 1.74 0 2.833 1.008 4.276 1.008 1.397 0 2.244-1.01 4.253-1.01 1.523 0 3.136.83 4.284 2.264-3.767 2.064-3.153 7.437.606 9.407z"/></svg>
+      Continue with Apple
+    </button>
+
     <div class="divider"><span>or</span></div>
 
     <div class="auth-tabs">
@@ -649,6 +776,15 @@
     </form>
 
     <button class="link-btn forgot-link" id="forgotPasswordBtn">Forgot password?</button>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="articleModalOverlay">
+  <div class="modal article-modal" role="dialog" aria-modal="true" aria-labelledby="articleModalTitle">
+    <button class="icon-btn modal-close" id="articleModalClose" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <div id="articleModalContent"></div>
   </div>
 </div>
 
@@ -735,6 +871,11 @@ function navigate(view) {
   });
   window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
   closeMobileNav();
+
+  if (view === "feed") renderFeedGrid();
+  if (view === "insights") loadInsights();
+  if (view === "alerts") loadAlerts();
+  if (view === "settings") renderSettingsView();
 }
 
 function routeFromHash() {
@@ -846,6 +987,7 @@ const authModalOverlay = document.getElementById("authModalOverlay");
 const authModalClose = document.getElementById("authModalClose");
 const signInBtn = document.getElementById("signInBtn");
 const googleSignInBtn = document.getElementById("googleSignInBtn");
+const appleSignInBtn = document.getElementById("appleSignInBtn");
 const emailAuthForm = document.getElementById("emailAuthForm");
 const authTabs = document.querySelectorAll(".auth-tab");
 const authError = document.getElementById("authError");
@@ -897,6 +1039,17 @@ googleSignInBtn.addEventListener("click", async () => {
   try {
     const fb = await loadFirebase();
     await fb.signInWithGoogle();
+    closeAuthModal();
+    runPendingAction();
+  } catch (err) {
+    showAuthError(err);
+  }
+});
+
+appleSignInBtn.addEventListener("click", async () => {
+  try {
+    const fb = await loadFirebase();
+    await fb.signInWithApple();
     closeAuthModal();
     runPendingAction();
   } catch (err) {
@@ -964,8 +1117,6 @@ function runPendingAction() {
  * ------------------------------------------------------------------ */
 const authArea = document.getElementById("authArea");
 const mobileAuthArea = document.getElementById("mobileAuthArea");
-const settingsHeading = document.getElementById("settingsHeading");
-const settingsBody = document.getElementById("settingsBody");
 
 function initials(user) {
   const src = user.displayName || user.email || "?";
@@ -977,22 +1128,25 @@ function initials(user) {
     .join("");
 }
 
+function avatarContent(user) {
+  if (user.photoURL) return `<img src="${escapeHtml(user.photoURL)}" alt="" />`;
+  return escapeHtml(initials(user));
+}
+
 function renderAuthUI(user) {
   if (!user) {
     authArea.innerHTML = `<button class="btn btn-primary" id="signInBtn">Sign In</button>`;
     document.getElementById("signInBtn").addEventListener("click", () => openAuthModal());
     mobileAuthArea.innerHTML = `<button class="btn btn-primary btn-block" id="signInBtnMobile">Sign In</button>`;
     document.getElementById("signInBtnMobile").addEventListener("click", () => openAuthModal());
-
-    settingsHeading.textContent = "Sign in to view Settings";
-    settingsBody.textContent = "Settings — including your profile, Telegram link, and notification preferences — are only available to signed-in users.";
+    renderSettingsView();
     return;
   }
 
   const name = user.displayName || user.email.split("@")[0];
   authArea.innerHTML = `
     <div class="user-chip" id="userChip">
-      <div class="avatar">${initials(user)}</div>
+      <div class="avatar">${avatarContent(user)}</div>
       <span class="user-chip-name">${escapeHtml(name)}</span>
     </div>
   `;
@@ -1012,8 +1166,7 @@ function renderAuthUI(user) {
     toggleUserDropdown(chip, user);
   });
 
-  settingsHeading.textContent = "Settings";
-  settingsBody.textContent = `Signed in as ${user.email}. Profile editing, Telegram linking, notification preferences, and theme controls are coming next.`;
+  renderSettingsView();
 }
 
 function toggleUserDropdown(chip) {
@@ -1098,8 +1251,60 @@ function shareItem(item) {
   }
 }
 
-function openArticle() {
-  toast("Full article pages are coming in the next update.");
+const articleModalOverlay = document.getElementById("articleModalOverlay");
+const articleModalClose = document.getElementById("articleModalClose");
+const articleModalContent = document.getElementById("articleModalContent");
+
+function openArticle(item) {
+  const isBookmarked = bookmarks.has(item.id);
+  articleModalContent.innerHTML = `
+    <span class="badge">${escapeHtml(item.category)}</span>
+    <h2>${escapeHtml(item.title)}</h2>
+    <p class="card-summary">${escapeHtml(item.summary)}</p>
+    <div class="card-bottom">
+      <span class="card-time">${timeAgo(item.publishedAt)}</span>
+      <div class="card-actions">
+        <button class="card-action bookmark-btn ${isBookmarked ? "bookmarked" : ""}" aria-label="Bookmark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+        </button>
+        <button class="card-action share-btn" aria-label="Share">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+        </button>
+      </div>
+    </div>
+  `;
+  articleModalContent.querySelector(".bookmark-btn").addEventListener("click", () => { toggleBookmark(item); openArticle(item); });
+  articleModalContent.querySelector(".share-btn").addEventListener("click", () => shareItem(item));
+  articleModalOverlay.classList.remove("hidden");
+
+  // Keeps the URL deep-linkable/shareable without a full page navigation.
+  if (window.location.pathname !== `/feed/${item.slug}`) {
+    history.pushState({ slug: item.slug }, "", `/feed/${item.slug}`);
+  }
+}
+
+function closeArticleModal() {
+  articleModalOverlay.classList.add("hidden");
+  if (window.location.pathname.startsWith("/feed/")) {
+    history.pushState({}, "", "/");
+  }
+}
+articleModalClose.addEventListener("click", closeArticleModal);
+articleModalOverlay.addEventListener("click", (e) => { if (e.target === articleModalOverlay) closeArticleModal(); });
+
+// Direct visits to a shared /feed/:slug URL open that article over the feed.
+async function checkDeepLinkedArticle() {
+  const match = window.location.pathname.match(/^\/feed\/([^/]+)\/?$/);
+  if (!match) return;
+  try {
+    const res = await fetch(`/api/feed/${match[1]}`);
+    if (!res.ok) return;
+    const item = await res.json();
+    window.location.hash = "/feed";
+    openArticle(item);
+  } catch (err) {
+    console.error("Failed to load shared article:", err);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -1163,6 +1368,7 @@ function renderAllFeedRows() {
   renderFeedRow("row-latest", feedCache.slice(0, 8));
   renderFeedRow("row-trending", feedCache.filter((i) => i.trending));
   renderFeedRow("row-ecosystem", [...feedCache].reverse().slice(0, 6));
+  if (!document.getElementById("view-feed").classList.contains("hidden")) renderFeedGrid();
 }
 
 async function loadFeed() {
@@ -1178,6 +1384,94 @@ async function loadFeed() {
   }
 }
 loadFeed();
+
+/* ------------------------------------------------------------------ *
+ * Feed page (full listing with category filters)
+ * ------------------------------------------------------------------ */
+let activeFeedCategory = "All";
+
+function renderFeedGrid() {
+  const chipsEl = document.getElementById("feedCategoryChips");
+  const gridEl = document.getElementById("feedGrid");
+
+  if (feedCache.length === 0) {
+    chipsEl.innerHTML = "";
+    gridEl.innerHTML = `<div class="row-empty grid-empty">Today's feed is still loading — check back in a moment.</div>`;
+    return;
+  }
+
+  const categories = ["All", ...new Set(feedCache.map((i) => i.category))];
+  chipsEl.innerHTML = categories
+    .map((c) => `<button class="chip ${c === activeFeedCategory ? "active" : ""}" data-category="${escapeHtml(c)}">${escapeHtml(c)}</button>`)
+    .join("");
+  chipsEl.querySelectorAll(".chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      activeFeedCategory = chip.dataset.category;
+      renderFeedGrid();
+    });
+  });
+
+  const filtered = activeFeedCategory === "All" ? feedCache : feedCache.filter((i) => i.category === activeFeedCategory);
+  if (filtered.length === 0) {
+    gridEl.innerHTML = `<div class="row-empty grid-empty">No signals in this category yet.</div>`;
+    return;
+  }
+  renderFeedRow("feedGrid", filtered);
+}
+
+/* ------------------------------------------------------------------ *
+ * Alerts page — public, no sign-in required.
+ * ------------------------------------------------------------------ */
+async function loadAlerts() {
+  const el = document.getElementById("alertsGrid");
+  el.innerHTML = `<div class="row-empty grid-empty">Loading alerts…</div>`;
+  try {
+    const res = await fetch("/api/alerts");
+    const data = await res.json();
+    if (!data.items || data.items.length === 0) {
+      el.innerHTML = `<div class="row-empty grid-empty">No significant alerts right now — check back soon.</div>`;
+      return;
+    }
+    renderFeedRow("alertsGrid", data.items);
+  } catch (err) {
+    console.error("Failed to load alerts:", err);
+    el.innerHTML = `<div class="row-empty grid-empty">Couldn't load alerts. Please refresh.</div>`;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Insights page — real top gainers / losers / trending from the same
+ * daily market data behind the feed.
+ * ------------------------------------------------------------------ */
+function insightRowHTML(row) {
+  const changeKnown = typeof row.change24h === "number";
+  const changeClass = changeKnown ? (row.change24h >= 0 ? "action-buy" : "action-sell") : "";
+  const changeText = changeKnown ? `${row.change24h >= 0 ? "+" : ""}${row.change24h.toFixed(1)}%` : "—";
+  return `
+    <div class="insight-row">
+      <span><span class="insight-name">${escapeHtml(row.name)}</span><span class="insight-symbol">${escapeHtml(row.symbol)}</span></span>
+      <span class="insight-change ${changeClass}">${changeText}</span>
+    </div>
+  `;
+}
+
+async function loadInsights() {
+  const gainersEl = document.getElementById("insightsGainers");
+  const losersEl = document.getElementById("insightsLosers");
+  const trendingEl = document.getElementById("insightsTrending");
+  [gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Loading…</div>`; });
+
+  try {
+    const res = await fetch("/api/insights");
+    const data = await res.json();
+    gainersEl.innerHTML = (data.topGainers || []).length ? data.topGainers.map(insightRowHTML).join("") : `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
+    losersEl.innerHTML = (data.topLosers || []).length ? data.topLosers.map(insightRowHTML).join("") : `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
+    trendingEl.innerHTML = (data.trending || []).length ? data.trending.map(insightRowHTML).join("") : `<div class="insight-empty">No data yet — check back after the next refresh.</div>`;
+  } catch (err) {
+    console.error("Failed to load insights:", err);
+    [gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Couldn't load data.</div>`; });
+  }
+}
 
 /* ------------------------------------------------------------------ *
  * Smart Money / Listings / Funding — no real data source wired up yet
@@ -1223,9 +1517,179 @@ document.getElementById("heroSummaryBtn").addEventListener("click", () => {
 
 document.getElementById("year").textContent = new Date().getFullYear();
 
+/* ------------------------------------------------------------------ *
+ * Settings page — profile (name, photo), Telegram linking, theme.
+ * Guest view is the static markup already in the page; this only
+ * handles the signed-in state.
+ * ------------------------------------------------------------------ */
+const settingsGuest = document.getElementById("settingsGuest");
+const settingsLoggedIn = document.getElementById("settingsLoggedIn");
+const settingsSignInBtn = document.getElementById("settingsSignInBtn");
+const settingsAvatarPreview = document.getElementById("settingsAvatarPreview");
+const avatarFileInput = document.getElementById("avatarFileInput");
+const changePhotoBtn = document.getElementById("changePhotoBtn");
+const displayNameInput = document.getElementById("displayNameInput");
+const emailInput = document.getElementById("emailInput");
+const saveProfileBtn = document.getElementById("saveProfileBtn");
+const profileError = document.getElementById("profileError");
+const settingsThemeToggle = document.getElementById("settingsThemeToggle");
+
+settingsSignInBtn.addEventListener("click", () => openAuthModal());
+
+function renderSettingsView() {
+  if (!currentUser) {
+    settingsGuest.classList.remove("hidden");
+    settingsLoggedIn.classList.add("hidden");
+    return;
+  }
+
+  settingsGuest.classList.add("hidden");
+  settingsLoggedIn.classList.remove("hidden");
+
+  settingsAvatarPreview.innerHTML = avatarContent(currentUser);
+  displayNameInput.value = currentUser.displayName || "";
+  emailInput.value = currentUser.email || "";
+  profileError.classList.add("hidden");
+
+  loadTelegramStatus();
+}
+
+function downscaleImage(file, maxSize) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read that file."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Couldn't read that image."));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+changePhotoBtn.addEventListener("click", () => avatarFileInput.click());
+
+avatarFileInput.addEventListener("change", async () => {
+  const file = avatarFileInput.files[0];
+  avatarFileInput.value = "";
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    toast("Please choose an image file.");
+    return;
+  }
+
+  const originalLabel = changePhotoBtn.textContent;
+  try {
+    changePhotoBtn.textContent = "Uploading…";
+    const dataUrl = await downscaleImage(file, 320);
+
+    const uploadRes = await fetch("/api/upload/avatar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64: dataUrl }),
+    });
+    const uploadData = await uploadRes.json();
+    if (!uploadRes.ok) throw new Error(uploadData.error || "Upload failed");
+
+    const fb = await loadFirebase();
+    await fb.updateUserProfile({ photoURL: uploadData.url });
+    currentUser = fb.auth.currentUser;
+    renderAuthUI(currentUser);
+    toast("Profile photo updated.");
+  } catch (err) {
+    console.error("Avatar upload failed:", err);
+    toast(err.message || "Couldn't update your photo. Please try again.");
+  } finally {
+    changePhotoBtn.textContent = originalLabel;
+  }
+});
+
+saveProfileBtn.addEventListener("click", async () => {
+  const name = displayNameInput.value.trim();
+  profileError.classList.add("hidden");
+  const originalLabel = saveProfileBtn.textContent;
+  saveProfileBtn.textContent = "Saving…";
+  try {
+    const fb = await loadFirebase();
+    await fb.updateUserProfile({ displayName: name });
+    currentUser = fb.auth.currentUser;
+    renderAuthUI(currentUser);
+    toast("Profile updated.");
+  } catch (err) {
+    profileError.textContent = err.message || "Couldn't save your profile. Please try again.";
+    profileError.classList.remove("hidden");
+  } finally {
+    saveProfileBtn.textContent = originalLabel;
+  }
+});
+
+async function loadTelegramStatus() {
+  const el = document.getElementById("telegramStatus");
+  if (!currentUser) return;
+  el.innerHTML = `<p class="settings-muted">Checking Telegram status…</p>`;
+
+  try {
+    const res = await fetch(`/api/telegram/status?userId=${encodeURIComponent(currentUser.uid)}`);
+    const data = await res.json();
+
+    if (!data.configured) {
+      el.innerHTML = `<p class="settings-muted">Telegram isn't connected to Kairon yet.</p>`;
+      return;
+    }
+
+    if (data.linked && data.link) {
+      el.innerHTML = `
+        <div>
+          <span class="telegram-linked-badge">✅ Telegram Connected</span>
+          <div class="telegram-detail">${escapeHtml(data.link.telegramName || "")}${data.link.username ? ` · @${escapeHtml(data.link.username)}` : ""}</div>
+          <div class="telegram-detail">Chat ID: ${escapeHtml(String(data.link.chatId))}</div>
+        </div>
+      `;
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="telegram-status-row">
+        <span class="settings-muted">Get Kairon's daily briefing delivered to Telegram.</span>
+        <button class="btn btn-primary" id="linkTelegramBtn" type="button">Link Telegram</button>
+      </div>
+    `;
+    document.getElementById("linkTelegramBtn").addEventListener("click", async () => {
+      try {
+        const linkRes = await fetch(`/api/telegram/link?userId=${encodeURIComponent(currentUser.uid)}`);
+        const linkData = await linkRes.json();
+        if (!linkData.configured || !linkData.linkUrl) {
+          toast("Telegram isn't connected to Kairon yet.");
+          return;
+        }
+        window.open(linkData.linkUrl, "_blank", "noopener");
+        toast("Press Start in Telegram, then come back and refresh this page.");
+      } catch (err) {
+        toast("Couldn't start the Telegram link. Please try again.");
+      }
+    });
+  } catch (err) {
+    el.innerHTML = `<p class="settings-muted">Couldn't check Telegram status.</p>`;
+  }
+}
+
+settingsThemeToggle.addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  applyTheme(next);
+});
+
 // Called last so every section it can touch (mobile nav, view panels) is
 // already initialized.
 routeFromHash();
+checkDeepLinkedArticle();
 </script>
 </body>
 </html>
