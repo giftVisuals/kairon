@@ -17,9 +17,9 @@ const PUBLIC_URL = process.env.PUBLIC_URL || "https://kairon-production-79a5.up.
 // Firestore (Firebase Admin)
 //
 // Persists what used to be in-memory-only: Telegram links/preferences and
-// the daily intelligence snapshot (feed, summary, insights, funding,
-// listings) — so a redeploy no longer wipes them, and boot doesn't have to
-// regenerate the daily data from scratch. Requires FIREBASE_SERVICE_ACCOUNT_KEY
+// the daily intelligence snapshot (feed, summary, insights, coin analyses)
+// — so a redeploy no longer wipes them, and boot doesn't have to regenerate
+// the daily data from scratch. Requires FIREBASE_SERVICE_ACCOUNT_KEY
 // (the full JSON key file content, from Firebase Console → Project Settings
 // → Service Accounts → Generate new private key). Everything below degrades
 // gracefully to in-memory-only behavior if that isn't set, same pattern as
@@ -386,60 +386,53 @@ async function fetchTopMarketMovers() {
   return res.json();
 }
 
-// Trending: DexScreener first (real on-chain/DEX activity — Solana boosted
-// tokens, matching how people actually trade this via Axiom/DexScreener),
-// falling back to CoinGecko's trending search if DexScreener fails. Neither
-// of these calls is verifiable from local dev (DexScreener is blocked from
-// this sandbox the same way CoinGecko is) — confirm via Railway logs after
-// deploy, same as the funding/listings issue.
-async function fetchDexScreenerTrending() {
-  const boostsRes = await fetchWithTimeout(
-    "https://api.dexscreener.com/token-boosts/top/v1",
+// Trending: GeckoTerminal first — real organic trending pools (ranked by
+// actual trading activity), Solana network. We used DexScreener's boosted-
+// tokens endpoint here before, but that's PAID PROMOTION (projects pay to
+// appear there), not organic trending — actively misleading to label as
+// "trending" for someone comparing it against what he actually sees moving
+// on Axiom/DexScreener. Falls back to CoinGecko's trending search if
+// GeckoTerminal fails. Neither call is verifiable from local dev
+// (geckoterminal.com is blocked from this sandbox the same way
+// coingecko.com is) — confirm via Railway logs after deploy.
+async function fetchGeckoTerminalTrending() {
+  const res = await fetchWithTimeout(
+    "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools",
     { headers: { Accept: "application/json" } },
     10000
   );
-  if (!boostsRes.ok) throw new Error(`DexScreener boosts error: ${boostsRes.status}`);
-  const boosts = await boostsRes.json();
+  if (!res.ok) throw new Error(`GeckoTerminal trending_pools error: ${res.status}`);
+  const data = await res.json();
 
-  const solanaBoosts = (Array.isArray(boosts) ? boosts : [])
-    .filter((b) => b && b.chainId === "solana" && b.tokenAddress)
-    .slice(0, 10);
-  if (solanaBoosts.length === 0) throw new Error("No Solana boosted tokens returned");
-
-  const addresses = solanaBoosts.map((b) => b.tokenAddress).join(",");
-  const pairsRes = await fetchWithTimeout(
-    `https://api.dexscreener.com/latest/dex/tokens/${addresses}`,
-    { headers: { Accept: "application/json" } },
-    10000
-  );
-  if (!pairsRes.ok) throw new Error(`DexScreener tokens error: ${pairsRes.status}`);
-  const pairsData = await pairsRes.json();
-  const pairs = (pairsData && pairsData.pairs) || [];
-
-  // A token can have multiple pairs (pools) — keep the highest-liquidity one.
-  const byAddress = new Map();
-  for (const p of pairs) {
-    const addr = p.baseToken && p.baseToken.address;
-    if (!addr) continue;
-    const liquidity = (p.liquidity && p.liquidity.usd) || 0;
-    const existing = byAddress.get(addr);
-    if (!existing || liquidity > existing._liquidity) byAddress.set(addr, { ...p, _liquidity: liquidity });
-  }
+  const pools = Array.isArray(data.data) ? data.data : [];
+  const included = Array.isArray(data.included) ? data.included : [];
+  const tokensById = new Map(included.filter((i) => i.type === "token").map((t) => [t.id, t]));
 
   const results = [];
-  for (const boost of solanaBoosts) {
-    const pair = byAddress.get(boost.tokenAddress);
-    if (!pair || !pair.baseToken) continue;
+  const seenTokenIds = new Set();
+  for (const pool of pools) {
+    const attrs = pool.attributes || {};
+    const baseTokenRel = pool.relationships && pool.relationships.base_token && pool.relationships.base_token.data;
+    const token = baseTokenRel && tokensById.get(baseTokenRel.id);
+    if (!token || seenTokenIds.has(token.id)) continue;
+    seenTokenIds.add(token.id);
+
+    const tokenAttrs = token.attributes || {};
+    const change24h = attrs.price_change_percentage && attrs.price_change_percentage.h24;
+
     results.push({
-      id: boost.tokenAddress,
-      name: pair.baseToken.name || pair.baseToken.symbol || "Unknown",
-      symbol: (pair.baseToken.symbol || "").toUpperCase(),
+      id: tokenAttrs.address || token.id,
+      name: tokenAttrs.name || tokenAttrs.symbol || "Unknown",
+      symbol: (tokenAttrs.symbol || "").toUpperCase(),
       marketCapRank: null,
-      change24h: pair.priceChange && typeof pair.priceChange.h24 === "number" ? pair.priceChange.h24 : null,
-      source: "dexscreener",
+      change24h: change24h !== undefined && change24h !== null ? Number(change24h) : null,
+      volumeUsd24h: attrs.volume_usd && attrs.volume_usd.h24 ? Number(attrs.volume_usd.h24) : null,
+      source: "geckoterminal",
     });
+    if (results.length >= 10) break;
   }
-  if (results.length === 0) throw new Error("Could not resolve any boosted token pairs to price data");
+
+  if (results.length === 0) throw new Error("No trending pools resolved to token data");
   return results;
 }
 
@@ -464,11 +457,11 @@ async function fetchCoinGeckoTrendingNormalized() {
 
 async function fetchTrendingCoins() {
   try {
-    const trending = await fetchDexScreenerTrending();
-    console.log(`[intelligence] using DexScreener trending (${trending.length} Solana tokens)`);
+    const trending = await fetchGeckoTerminalTrending();
+    console.log(`[intelligence] using GeckoTerminal trending (${trending.length} Solana tokens)`);
     return trending;
   } catch (err) {
-    console.error("[intelligence] DexScreener trending failed, falling back to CoinGecko trending:", err.message);
+    console.error("[intelligence] GeckoTerminal trending failed, falling back to CoinGecko trending:", err.message);
     return fetchCoinGeckoTrendingNormalized();
   }
 }
@@ -527,8 +520,8 @@ function buildFeedItemsFromMarketData(movers, trending) {
     if (seen.has(t.id)) continue;
     seen.add(t.id);
     let category = inferCategory(t.id, t.symbol.toLowerCase());
-    if (category === "Macro" && t.source === "dexscreener") category = "Solana";
-    const sourceLabel = t.source === "dexscreener" ? "DexScreener" : "CoinGecko";
+    if (category === "Macro" && t.source === "geckoterminal") category = "Solana";
+    const sourceLabel = t.source === "geckoterminal" ? "GeckoTerminal" : "CoinGecko";
     const change = t.change24h;
     items.push({
       title: `${t.name} (${t.symbol}) is trending on ${sourceLabel} today`,
@@ -607,6 +600,121 @@ function buildFallbackSummary(movers, trending) {
   return points;
 }
 
+// ---------------------------------------------------------------------------
+// AI Coin Breakdown — a plain-language "why did this move, what could
+// happen next, how should I think about it" explanation for the day's most
+// interesting coins. This is the direct answer to "highlights the
+// strongest/most interesting coins of the day" — not just a number, actual
+// reasoning about it.
+// ---------------------------------------------------------------------------
+
+// Picks the coins worth explaining: biggest movers (excluding majors, which
+// don't need a "why did it pump" writeup) plus whatever's genuinely
+// trending, deduped, capped at 4 so it's one Groq call, not four.
+function selectTopInterestingCoins(movers, trending) {
+  const significantMovers = movers
+    .filter((m) => typeof m.price_change_percentage_24h === "number" && !MAJOR_IDS.includes(m.id))
+    .sort((a, b) => Math.abs(b.price_change_percentage_24h) - Math.abs(a.price_change_percentage_24h))
+    .slice(0, 3)
+    .map((m) => ({
+      id: m.id,
+      name: m.name,
+      symbol: m.symbol.toUpperCase(),
+      change24h: Number(m.price_change_percentage_24h.toFixed(2)),
+      category: inferCategory(m.id, m.symbol),
+      marketCapRank: m.market_cap_rank,
+      trendingSource: null,
+    }));
+
+  const trendingTop = trending.slice(0, 2).map((t) => {
+    let category = inferCategory(t.id, t.symbol.toLowerCase());
+    if (category === "Macro" && t.source === "geckoterminal") category = "Solana";
+    return {
+      id: t.id,
+      name: t.name,
+      symbol: t.symbol,
+      change24h: typeof t.change24h === "number" ? Number(t.change24h.toFixed(2)) : null,
+      category,
+      marketCapRank: t.marketCapRank,
+      trendingSource: t.source === "geckoterminal" ? "organic DEX trading activity" : "CoinGecko search interest",
+    };
+  });
+
+  const seen = new Set();
+  const combined = [];
+  for (const c of [...significantMovers, ...trendingTop]) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    combined.push(c);
+  }
+  return combined.slice(0, 4);
+}
+
+async function generateCoinAnalyses(coins) {
+  if (!GROQ_API_KEY) throw new Error("GROQ_API_KEY not configured");
+  if (coins.length === 0) throw new Error("No coins selected to analyze");
+
+  const response = await fetchWithTimeout(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.5,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You write short, beginner-friendly breakdowns of individual crypto tokens for an on-chain intelligence product called Kairon.",
+              "You are given ONLY each token's name, symbol, category, 24h price change, market cap rank (if known), and why it was flagged (a big price move, or trending, and if trending, whether that's from organic DEX trading activity or CoinGecko search interest).",
+              "You do NOT have real news or on-chain event data. Never invent a specific catalyst, headline, listing, or event you were not given — if you don't actually know the cause, describe it honestly in terms of the signal you do have (e.g. 'this lines up with a burst of trading activity' rather than fabricating a reason).",
+              "This is educational context, not financial advice. Never tell the reader to buy or sell, and never give a price target. For 'howToApproachIt', focus on: what would confirm the move is continuing vs fading, and real risk considerations (volatility, thin liquidity on small/micro caps, chasing a move that's already extended).",
+              'Return strict JSON of the shape: {"analyses": [{"id": "...", "whyItMoved": "...", "whatCouldHappenNext": "...", "howToApproachIt": "..."}]}. One object per coin given, in the same order. Each field 1-2 short sentences, plain simple language, explain any jargon you use.',
+            ].join(" "),
+          },
+          { role: "user", content: JSON.stringify(coins) },
+        ],
+      }),
+    },
+    15000
+  );
+
+  if (!response.ok) throw new Error(`Groq API error: ${response.status}`);
+
+  const data = await response.json();
+  const content = (data.choices && data.choices[0] && data.choices[0].message.content) || "{}";
+  const parsed = JSON.parse(content);
+  if (!Array.isArray(parsed.analyses) || parsed.analyses.length === 0) {
+    throw new Error("Groq returned no coin analyses");
+  }
+
+  const byId = new Map(parsed.analyses.map((a) => [a.id, a]));
+  return coins
+    .map((c) => {
+      const a = byId.get(c.id);
+      if (!a || !a.whyItMoved) return null;
+      return {
+        id: c.id,
+        name: c.name,
+        symbol: c.symbol,
+        change24h: c.change24h,
+        category: c.category,
+        whyItMoved: a.whyItMoved,
+        whatCouldHappenNext: a.whatCouldHappenNext || null,
+        howToApproachIt: a.howToApproachIt || null,
+      };
+    })
+    .filter(Boolean);
+}
+
+let latestCoinAnalyses = [];
+
+app.get("/api/analysis", (req, res) => {
+  res.json({ items: latestCoinAnalyses });
+});
+
 let latestSummary = { points: ["Today's briefing is being generated — check back shortly."], generatedAt: null };
 
 // Raw market data behind the feed/summary, kept around so the Insights and
@@ -656,24 +764,6 @@ function buildMarketSnapshot(movers, trending) {
   return { majors, topGainers, topLosers, trending: trendingRows, updatedAt: new Date().toISOString() };
 }
 
-// Funding Rounds and Exchange Listings: both previously tried free
-// endpoints (DefiLlama's /raises, CoinGecko's /status_updates) that turned
-// out not to actually be free/available in production (402 and 404
-// respectively — confirmed live, not reachable to verify from local dev).
-// Rather than leave them silently broken, these stay as honest "coming
-// soon" states on the frontend (see index.html) until a real data source
-// (paid or otherwise) is wired up. See CLAUDE.md → FUTURE FEATURES.
-let latestFundingRounds = [];
-let latestExchangeListings = [];
-
-app.get("/api/funding", (req, res) => {
-  res.json({ items: latestFundingRounds });
-});
-
-app.get("/api/listings", (req, res) => {
-  res.json({ items: latestExchangeListings });
-});
-
 // Persists the current in-memory snapshot to Firestore's feed/latest doc.
 // Called after every regeneration so the next boot can load real data
 // instead of falling back to the tiny seed or re-fetching immediately.
@@ -684,8 +774,7 @@ async function saveIntelligenceSnapshot() {
       feedItems,
       summary: latestSummary,
       marketSnapshot: latestMarketSnapshot,
-      fundingRounds: latestFundingRounds,
-      exchangeListings: latestExchangeListings,
+      coinAnalyses: latestCoinAnalyses,
       savedAt: new Date().toISOString(),
     });
   } catch (err) {
@@ -705,8 +794,7 @@ async function loadIntelligenceSnapshot() {
     if (Array.isArray(data.feedItems) && data.feedItems.length > 0) feedItems = data.feedItems;
     if (data.summary) latestSummary = data.summary;
     if (data.marketSnapshot) latestMarketSnapshot = data.marketSnapshot;
-    if (Array.isArray(data.fundingRounds)) latestFundingRounds = data.fundingRounds;
-    if (Array.isArray(data.exchangeListings)) latestExchangeListings = data.exchangeListings;
+    if (Array.isArray(data.coinAnalyses)) latestCoinAnalyses = data.coinAnalyses;
     console.log(`[firestore] loaded cached intelligence snapshot from ${data.savedAt}`);
     return true;
   } catch (err) {
@@ -733,9 +821,18 @@ async function generateDailyIntelligence() {
     }
     latestSummary = { points, generatedAt: new Date().toISOString() };
 
+    try {
+      const topCoins = selectTopInterestingCoins(movers, trending);
+      latestCoinAnalyses = await generateCoinAnalyses(topCoins);
+      console.log(`[intelligence] generated ${latestCoinAnalyses.length} coin analyses`);
+    } catch (err) {
+      console.error("[intelligence] coin analysis generation failed, keeping previous data:", err.message);
+    }
+
     console.log(`[intelligence] refreshed ${feedItems.length} feed items at ${latestSummary.generatedAt}`);
   } catch (err) {
     console.error("[intelligence] generateDailyIntelligence failed, keeping previous data:", err.message);
+    await sendAdminAlert(`⚠️ Kairon daily intelligence generation failed: ${err.message}\n\nThe site may be showing stale data.`);
   }
 
   await saveIntelligenceSnapshot();
@@ -818,6 +915,21 @@ app.post("/api/upload/avatar", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Support / payment
+//
+// No subscription system — just a wallet address to send crypto to.
+// Reconciling who paid is manual for now (informal, matches how this
+// audience actually transacts). Returns not-configured until the env var
+// is set, same pattern as everything else here.
+// ---------------------------------------------------------------------------
+
+const PAYMENT_WALLET_ADDRESS = process.env.PAYMENT_WALLET_ADDRESS || "";
+
+app.get("/api/support", (req, res) => {
+  res.json({ configured: Boolean(PAYMENT_WALLET_ADDRESS), address: PAYMENT_WALLET_ADDRESS || null });
+});
+
+// ---------------------------------------------------------------------------
 // Settings API (placeholder)
 //
 // Real per-user settings require verifying a Firebase ID token server-side
@@ -850,6 +962,11 @@ app.post("/api/settings", (req, res) => {
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || "";
+
+// Where operational alerts go (e.g. the daily pipeline breaking) — a
+// person, not the public bot. Get your own chat id by messaging
+// @userinfobot on Telegram.
+const ADMIN_TELEGRAM_CHAT_ID = process.env.ADMIN_TELEGRAM_CHAT_ID || "";
 
 // Verifies incoming webhook calls actually come from Telegram (Telegram
 // echoes this back in the X-Telegram-Bot-Api-Secret-Token header on every
@@ -941,6 +1058,18 @@ async function callTelegramApi(method, payload) {
   return response.json();
 }
 
+// Operational alert to the admin only — not subscribers. Called when the
+// daily pipeline fails outright, so a broken/stale product doesn't go
+// unnoticed until a paying customer complains.
+async function sendAdminAlert(message) {
+  if (!isTelegramConfigured() || !ADMIN_TELEGRAM_CHAT_ID) return;
+  try {
+    await callTelegramApi("sendMessage", { chat_id: ADMIN_TELEGRAM_CHAT_ID, text: message });
+  } catch (err) {
+    console.error("[admin-alert] failed to send:", err.message);
+  }
+}
+
 async function ensureTelegramWebhook() {
   if (!isTelegramConfigured()) return;
   try {
@@ -1028,6 +1157,7 @@ async function sendDailyDigest() {
     const relevant = prefs && prefs.size > 0 ? feedItems.filter((i) => prefs.has(i.category)) : feedItems;
     if (relevant.length === 0) continue; // nothing matches their filter today — skip rather than send an empty digest
 
+    const spotlight = latestCoinAnalyses[0];
     const lines = [
       "*Kairon Daily Briefing*",
       "",
@@ -1035,6 +1165,9 @@ async function sendDailyDigest() {
       "",
       "*Top signals today:*",
       ...relevant.slice(0, 3).map((i) => `— ${i.title}`),
+      ...(spotlight
+        ? ["", `*Spotlight: ${spotlight.name} (${spotlight.symbol})*`, spotlight.whyItMoved]
+        : []),
     ];
 
     try {

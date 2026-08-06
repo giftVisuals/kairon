@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Kairon — On-chain Intelligence, Before Everyone Else</title>
-<meta name="description" content="Kairon curates the crypto signals that matter — news, wallet activity, exchange listings, funding rounds, and governance — distilled into one daily intelligence feed." />
+<meta name="description" content="Kairon curates the crypto signals that matter — market movers, trending tokens, and AI-powered analysis — distilled into one daily intelligence feed." />
 <meta name="theme-color" content="#0A0B0F" />
 <link rel="icon" href="https://i.postimg.cc/1RqXSNB7/file-00000000ba9c8246bc50cdc3b8a6505e.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -287,6 +287,28 @@
     max-width: var(--container); margin: 0 auto; padding: 0 20px 16px;
   }
   .section-head h2 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+  .section-subtitle {
+    max-width: var(--container); margin: -8px auto 0; padding: 0 20px 16px;
+    font-size: 13.5px; color: var(--text-muted); line-height: 1.5;
+  }
+
+  /* AI Coin Breakdown */
+  .analysis-grid {
+    max-width: var(--container); margin: 0 auto; padding: 4px 20px 10px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;
+  }
+  .analysis-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+    padding: 18px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .analysis-card-top { display: flex; align-items: center; justify-content: space-between; }
+  .analysis-coin-name { font-size: 15.5px; font-weight: 700; }
+  .analysis-coin-symbol { color: var(--text-faint); font-weight: 500; margin-left: 4px; font-size: 13px; }
+  .analysis-block { display: flex; flex-direction: column; gap: 4px; }
+  .analysis-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--accent);
+  }
+  .analysis-text { font-size: 13.5px; color: var(--text); line-height: 1.55; }
 
   .card-row {
     display: flex; gap: 14px; overflow-x: auto; padding: 4px 20px 10px;
@@ -341,7 +363,7 @@
   .card-action.bookmarked { color: var(--accent); }
   .card-action.bookmarked svg { fill: var(--accent); }
 
-  /* Smart money / listings / funding cards */
+  /* Shared key-value row + pill styles (used by Insights tables and the AI Coin Breakdown change badge) */
   .kv-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
   .kv-row .k { color: var(--text-faint); }
   .kv-row .v { font-weight: 600; }
@@ -477,6 +499,11 @@
   .modal-close { position: absolute; top: 14px; right: 14px; }
   .modal h2 { font-size: 19px; font-weight: 800; margin-bottom: 6px; }
   .modal-sub { font-size: 13.5px; color: var(--text-muted); margin-bottom: 20px; line-height: 1.5; }
+  .support-address {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; word-break: break-all;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+    margin-bottom: 14px; color: var(--text);
+  }
 
   .divider { display: flex; align-items: center; gap: 12px; margin: 18px 0; color: var(--text-faint); font-size: 12px; }
   .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
@@ -586,7 +613,7 @@
       <div class="hero-inner">
         <span class="eyebrow">Daily on-chain intelligence</span>
         <h1>Wake up to the market before everyone else.</h1>
-        <p class="hero-sub">Kairon curates the crypto signals that matter — news, wallet activity, exchange listings, funding rounds, and governance — distilled into one daily briefing.</p>
+        <p class="hero-sub">Kairon curates the crypto signals that matter — market movers, trending tokens, and AI-powered analysis of why they moved — distilled into one daily briefing.</p>
         <div class="hero-actions">
           <button class="btn btn-primary btn-lg" data-nav data-view="feed">Explore the Feed</button>
           <button class="btn btn-ghost btn-lg" id="heroSummaryBtn">Read Today's Summary</button>
@@ -610,18 +637,11 @@
     </section>
 
     <section class="content-section">
-      <div class="section-head"><h2>Smart Money Activity</h2><button class="link-btn" data-nav data-view="insights">View all →</button></div>
-      <div class="card-row" id="row-smartmoney"></div>
-    </section>
-
-    <section class="content-section">
-      <div class="section-head"><h2>Exchange Listings</h2><button class="link-btn" data-nav data-view="insights">View all →</button></div>
-      <div class="card-row" id="row-listings"></div>
-    </section>
-
-    <section class="content-section">
-      <div class="section-head"><h2>Funding Rounds</h2><button class="link-btn" data-nav data-view="insights">View all →</button></div>
-      <div class="card-row" id="row-funding"></div>
+      <div class="section-head">
+        <h2>AI Coin Breakdown</h2>
+      </div>
+      <p class="section-subtitle">Why today's most interesting coins moved, what could happen next, and how to think about them — in plain language. Educational context, not financial advice.</p>
+      <div class="analysis-grid" id="coinAnalysisGrid"></div>
     </section>
 
     <section class="content-section">
@@ -762,6 +782,7 @@
         <a href="#/alerts" data-nav data-view="alerts">Alerts</a>
         <a href="#/bookmarks" data-nav data-view="bookmarks">Bookmarks</a>
         <a href="#/settings" data-nav data-view="settings">Settings</a>
+        <a href="#" id="supportLink">Support Kairon</a>
       </div>
     </div>
     <div class="footer-bottom">© <span id="year"></span> Kairon. On-chain intelligence, before everyone else.</div>
@@ -820,6 +841,16 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
     <div id="articleModalContent"></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="supportModalOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="supportModalTitle">
+    <button class="icon-btn modal-close" id="supportModalClose" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <h2 id="supportModalTitle">Support Kairon</h2>
+    <div id="supportModalBody"></div>
   </div>
 </div>
 
@@ -1577,7 +1608,7 @@ async function loadInsights() {
     losersEl.innerHTML = (data.topLosers || []).length ? data.topLosers.map(insightRowHTML).join("") : emptyMsg;
     trendingEl.innerHTML = (data.trending || []).length ? data.trending.map(insightRowHTML).join("") : emptyMsg;
     const trendingSource = data.trending && data.trending[0] && data.trending[0].source;
-    trendingHeading.textContent = trendingSource === "coingecko" ? "Trending on CoinGecko" : "Trending on DexScreener";
+    trendingHeading.textContent = trendingSource === "coingecko" ? "Trending on CoinGecko" : "Trending on GeckoTerminal";
   } catch (err) {
     console.error("Failed to load insights:", err);
     [majorsEl, gainersEl, losersEl, trendingEl].forEach((el) => { el.innerHTML = `<div class="insight-empty">Couldn't load data.</div>`; });
@@ -1585,20 +1616,56 @@ async function loadInsights() {
 }
 
 /* ------------------------------------------------------------------ *
- * Smart Money Activity, Exchange Listings, Funding Rounds — no working
- * free data source for any of these right now. Exchange Listings and
- * Funding Rounds briefly used CoinGecko's status_updates and DefiLlama's
- * raises endpoints, but both turned out to require a paid plan in
- * production (confirmed via live 402/404 responses) despite being
- * documented as free — reverted rather than leave them silently broken.
- * Rather than fabricate numbers, all three stay honest empty states.
+ * AI Coin Breakdown — why today's most interesting coins moved, what
+ * could happen next, and how to think about them. Real Groq analysis
+ * over real data (see GET /api/analysis) — explicitly educational, not
+ * financial advice; the model is instructed never to invent a catalyst
+ * or tell anyone to buy/sell.
  * ------------------------------------------------------------------ */
-function renderComingSoonRow(containerId, message) {
-  document.getElementById(containerId).innerHTML = `<div class="row-empty">${escapeHtml(message)}</div>`;
+function analysisCardHTML(item) {
+  const changeKnown = typeof item.change24h === "number";
+  const changeClass = changeKnown ? (item.change24h >= 0 ? "action-buy" : "action-sell") : "";
+  const changeText = changeKnown ? `${item.change24h >= 0 ? "+" : ""}${item.change24h.toFixed(1)}%` : "";
+  return `
+    <article class="analysis-card">
+      <div class="analysis-card-top">
+        <span><span class="analysis-coin-name">${escapeHtml(item.name)}</span><span class="analysis-coin-symbol">${escapeHtml(item.symbol)}</span></span>
+        <span class="insight-change ${changeClass}">${changeText}</span>
+      </div>
+      <div class="analysis-block">
+        <span class="analysis-label">Why it moved</span>
+        <p class="analysis-text">${escapeHtml(item.whyItMoved)}</p>
+      </div>
+      ${item.whatCouldHappenNext ? `
+      <div class="analysis-block">
+        <span class="analysis-label">What could happen next</span>
+        <p class="analysis-text">${escapeHtml(item.whatCouldHappenNext)}</p>
+      </div>` : ""}
+      ${item.howToApproachIt ? `
+      <div class="analysis-block">
+        <span class="analysis-label">How to approach it</span>
+        <p class="analysis-text">${escapeHtml(item.howToApproachIt)}</p>
+      </div>` : ""}
+    </article>
+  `;
 }
-renderComingSoonRow("row-smartmoney", "Wallet-tracking data needs a paid provider (Whale Alert / Arkham / Nansen) — not wired up yet.");
-renderComingSoonRow("row-listings", "Live exchange listing data needs a paid provider — not wired up yet.");
-renderComingSoonRow("row-funding", "Live funding round data needs a paid provider — not wired up yet.");
+
+async function loadCoinAnalysis() {
+  const el = document.getElementById("coinAnalysisGrid");
+  try {
+    const res = await fetch("/api/analysis");
+    const data = await res.json();
+    if (!data.items || data.items.length === 0) {
+      el.innerHTML = `<div class="row-empty grid-empty">Today's coin breakdown is being generated — check back shortly.</div>`;
+      return;
+    }
+    el.innerHTML = data.items.map(analysisCardHTML).join("");
+  } catch (err) {
+    console.error("Failed to load coin analysis:", err);
+    el.innerHTML = `<div class="row-empty grid-empty">Couldn't load today's breakdown.</div>`;
+  }
+}
+loadCoinAnalysis();
 
 /* ------------------------------------------------------------------ *
  * AI Market Summary — real summary generated server-side (Groq) from
@@ -1630,6 +1697,42 @@ document.getElementById("heroSummaryBtn").addEventListener("click", () => {
 });
 
 document.getElementById("year").textContent = new Date().getFullYear();
+
+/* ------------------------------------------------------------------ *
+ * Support / payment modal
+ * ------------------------------------------------------------------ */
+const supportLink = document.getElementById("supportLink");
+const supportModalOverlay = document.getElementById("supportModalOverlay");
+const supportModalClose = document.getElementById("supportModalClose");
+const supportModalBody = document.getElementById("supportModalBody");
+
+supportLink.addEventListener("click", async (e) => {
+  e.preventDefault();
+  supportModalBody.innerHTML = `<p class="modal-sub">Loading…</p>`;
+  supportModalOverlay.classList.remove("hidden");
+  try {
+    const res = await fetch("/api/support");
+    const data = await res.json();
+    if (!data.configured || !data.address) {
+      supportModalBody.innerHTML = `<p class="modal-sub">Support isn't set up yet — check back soon.</p>`;
+      return;
+    }
+    supportModalBody.innerHTML = `
+      <p class="modal-sub">If Kairon's daily briefing is useful to you, you can support its development by sending SOL or USDC to:</p>
+      <div class="support-address" id="supportAddress">${escapeHtml(data.address)}</div>
+      <button class="btn btn-primary btn-block" id="copySupportAddress" type="button">Copy address</button>
+      <p class="modal-sub" style="margin-top:12px">This is a direct, informal way to support the project — not a subscription.</p>
+    `;
+    document.getElementById("copySupportAddress").addEventListener("click", () => {
+      navigator.clipboard.writeText(data.address).then(() => toast("Address copied to clipboard."));
+    });
+  } catch (err) {
+    console.error("Failed to load support info:", err);
+    supportModalBody.innerHTML = `<p class="modal-sub">Couldn't load support info. Please try again.</p>`;
+  }
+});
+supportModalClose.addEventListener("click", () => supportModalOverlay.classList.add("hidden"));
+supportModalOverlay.addEventListener("click", (e) => { if (e.target === supportModalOverlay) supportModalOverlay.classList.add("hidden"); });
 
 /* ------------------------------------------------------------------ *
  * Bookmarks page
